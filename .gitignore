@@ -1,0 +1,27 @@
+# Node dependencies and local caches
+node_modules/
+.npm-cache/
+
+# Vite and Android build outputs
+dist/
+android/.gradle/
+android/.idea/
+android/app/build/
+android/build/
+android/local.properties
+
+# Locally downloaded Android/Gradle toolchains
+.build-tools/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Generated document-rendering output
+docx_render/
