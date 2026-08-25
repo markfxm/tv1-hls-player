@@ -162,6 +162,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { calculateNodeFlyoutPosition } from "./nodeFlyoutPosition.js";
 import { createHlsRecoveryController } from "./player/hlsRecovery.ts";
 import { createPlayerLogger } from "./player/playerLogger.ts";
+import { LiveBufferManager } from "./player/liveBufferManager.ts";
 import { NodeManager, parseStreamNodes } from "./player/nodeManager.ts";
 
 const videoRef = ref(null);
@@ -184,6 +185,7 @@ const activeCategory = ref("");
 
 let hls = null;
 let hlsRecovery = null;
+let liveBufferManager = null;
 let nodeManager = null;
 let nodeManagerChannelId = "";
 let nodeAttemptStartedAt = 0;
@@ -328,6 +330,7 @@ function syncUrlInput() {
 function destroyHls() {
   hlsRecovery?.destroy();
   hlsRecovery = null;
+  liveBufferManager = null;
   if (hls) {
     hls.destroy();
     hls = null;
@@ -580,14 +583,23 @@ async function playCurrentUrl({ automaticFailover = false } = {}) {
       let triedNativeFallback = false;
       const hlsInstance = new Hls({
         enableWorker: true,
-        lowLatencyMode: true,
+        lowLatencyMode: false,
+        liveSyncDurationCount: 3,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        backBufferLength: 30,
         manifestLoadingTimeOut: 15000,
         levelLoadingTimeOut: 15000,
         fragLoadingTimeOut: 20000
       });
       hls = hlsInstance;
+      const playbackBufferManager = new LiveBufferManager(video);
+      liveBufferManager = playbackBufferManager;
       const playbackRecovery = createHlsRecoveryController({ logger: createPlayerLogger() });
       hlsRecovery = playbackRecovery;
+      hlsInstance.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+        playbackBufferManager.setLive(data?.details?.live === true);
+      });
       hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
         if (requestId !== playRequestId || playbackNodeManager !== nodeManager) {
           return;
@@ -823,6 +835,13 @@ function handlePlaying() {
 
 function handleWaiting() {
   setStatus("缓冲中...");
+  handleTimeUpdate();
+}
+
+function handleTimeUpdate() {
+  if (liveBufferManager?.shouldTriggerRecovery()) {
+    liveBufferManager.jumpToLive();
+  }
 }
 
 function handleVideoError() {
@@ -835,6 +854,7 @@ onMounted(() => {
   const video = videoRef.value;
   video?.addEventListener("playing", handlePlaying);
   video?.addEventListener("waiting", handleWaiting);
+  video?.addEventListener("timeupdate", handleTimeUpdate);
   video?.addEventListener("error", handleVideoError);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
   window.addEventListener("resize", handleWindowResize);
@@ -845,6 +865,7 @@ onBeforeUnmount(() => {
   const video = videoRef.value;
   video?.removeEventListener("playing", handlePlaying);
   video?.removeEventListener("waiting", handleWaiting);
+  video?.removeEventListener("timeupdate", handleTimeUpdate);
   video?.removeEventListener("error", handleVideoError);
   document.removeEventListener("fullscreenchange", handleFullscreenChange);
   window.removeEventListener("resize", handleWindowResize);

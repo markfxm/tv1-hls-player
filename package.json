@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 8080",
     "build": "vite build",
-    "test": "node scripts/verify_cctv_hd_nodes.mjs && node scripts/test_node_flyout_position.mjs && node scripts/test_live_player_controller_disabled.mjs && node scripts/test_channel_node_flyout_focus.mjs && node scripts/test_android_tv_remote_flow.mjs && node --experimental-strip-types tests/player/hlsRecovery.test.ts && node --experimental-strip-types tests/player/nodeManager.test.ts && node --experimental-strip-types tests/player/hlsFailover.integration.test.ts",
+    "test": "node scripts/verify_cctv_hd_nodes.mjs && node scripts/test_node_flyout_position.mjs && node scripts/test_live_player_controller_disabled.mjs && node scripts/test_channel_node_flyout_focus.mjs && node scripts/test_android_tv_remote_flow.mjs && node --experimental-strip-types tests/player/hlsRecovery.test.ts && node --experimental-strip-types tests/player/nodeManager.test.ts && node --experimental-strip-types tests/player/hlsFailover.integration.test.ts && node --experimental-strip-types tests/player/liveBuffer.test.ts",
     "preview": "vite preview --host 0.0.0.0 --port 8080"
   },
   "dependencies": {
