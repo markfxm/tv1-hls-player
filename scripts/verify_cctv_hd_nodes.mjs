@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const channelFile = resolve("public/channels.json");
 const androidChannelFile = resolve("android", "app", "src", "main", "assets", "channels.json");
-const sourceFile = resolve("..", "cctv.txt");
+const sourceFile = resolve("tests", "fixtures", "cctv.txt");
 const cctv6MulticastUrl = "http://202.169.224.202:8800/udp/239.9.1.17:1234";
 
 const channels = JSON.parse(readFileSync(channelFile, "utf8"));

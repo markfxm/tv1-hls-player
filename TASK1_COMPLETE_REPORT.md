@@ -34,7 +34,7 @@
 - `npm run build`：通过。
   - Vite 报告原项目已有的 chunk 大小警告，但未出现编译错误。
 - `npm test`：被现有测试前置依赖阻断。
-  - `scripts/verify_cctv_hd_nodes.mjs` 读取仓库外的 `E:\workspace\cctv.txt`。
+  - `scripts/verify_cctv_hd_nodes.mjs` 曾读取仓库外的 `cctv.txt`。
   - 当前文件不存在，错误为 `ENOENT`；本任务未修改该无关测试及外部数据依赖。
 
 ## Commit
