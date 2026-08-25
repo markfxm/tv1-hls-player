@@ -162,6 +162,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { calculateNodeFlyoutPosition } from "./nodeFlyoutPosition.js";
 import { createHlsRecoveryController } from "./player/hlsRecovery.ts";
 import { createPlayerLogger } from "./player/playerLogger.ts";
+import { NodeManager, parseStreamNodes } from "./player/nodeManager.ts";
 
 const videoRef = ref(null);
 const channelListRef = ref(null);
@@ -183,6 +184,9 @@ const activeCategory = ref("");
 
 let hls = null;
 let hlsRecovery = null;
+let nodeManager = null;
+let nodeManagerChannelId = "";
+let nodeAttemptStartedAt = 0;
 let flvPlayer = null;
 let flvModule = null;
 let playRequestId = 0;
@@ -247,6 +251,26 @@ function getChannelNodes(channel) {
     return channel.nodes;
   }
   return [{ label: "节点1", url: channel.url || "" }];
+}
+
+function resetNodeManager() {
+  nodeManager = null;
+  nodeManagerChannelId = "";
+}
+
+function ensureNodeManager(channel) {
+  if (!channel) {
+    return null;
+  }
+  if (!nodeManager || nodeManagerChannelId !== channel.id) {
+    nodeManager = new NodeManager(parseStreamNodes(getChannelNodes(channel)));
+    nodeManagerChannelId = channel.id;
+  }
+  return nodeManager;
+}
+
+function getNodeIndex(channel, url) {
+  return getChannelNodes(channel).findIndex((node) => normalizeUrl(node.url) === normalizeUrl(url));
 }
 
 function loadCustomNodes() {
@@ -358,6 +382,7 @@ function stopPlayback(message = "已停止播放。") {
 function selectChannel(channelId, autoPlay = false) {
   activeChannelId.value = channelId;
   activeNodeIndex.value = 0;
+  resetNodeManager();
   syncUrlInput();
 
   if (autoPlay) {
@@ -390,6 +415,9 @@ function selectNode(index, autoPlay = false) {
 function selectChannelNode(channelId, index, autoPlay = false) {
   activeChannelId.value = channelId;
   activeNodeIndex.value = index;
+  if (nodeManagerChannelId !== channelId) {
+    resetNodeManager();
+  }
   syncUrlInput();
 
   if (autoPlay) {
@@ -470,6 +498,7 @@ function addNode(channelId = activeChannelId.value) {
   });
   activeChannelId.value = channel.id;
   activeNodeIndex.value = channel.nodes.length - 1;
+  resetNodeManager();
   expandedChannelId.value = "";
   nodeFlyoutStyle.value = {};
   syncUrlInput();
@@ -499,12 +528,18 @@ function deleteNode(channelId, index) {
   } else {
     setStatus("已删除用户添加的节点。");
   }
+  resetNodeManager();
   saveCustomNodes();
 }
 
-async function playCurrentUrl() {
+async function playCurrentUrl({ automaticFailover = false } = {}) {
   const video = videoRef.value;
-  const url = normalizeUrl(streamUrl.value);
+  const channel = activeChannel.value;
+  const playbackNodeManager = ensureNodeManager(channel);
+  if (!automaticFailover && playbackNodeManager) {
+    playbackNodeManager.selectNode(normalizeUrl(streamUrl.value));
+  }
+  const url = normalizeUrl(streamUrl.value || (automaticFailover ? playbackNodeManager?.getCurrentNode()?.url : ""));
   const playbackUrl = getPlaybackUrl(url);
   const requestId = playRequestId + 1;
   playRequestId = requestId;
@@ -519,6 +554,7 @@ async function playCurrentUrl() {
 
   destroyPlaybackEngine();
   showEmptyState.value = false;
+  nodeAttemptStartedAt = Date.now();
   setStatus(`加载中：${activeChannel.value?.name || "未知频道"} ${activeNode.value.label || `节点${activeNodeIndex.value + 1}`}...`);
 
   try {
@@ -550,11 +586,15 @@ async function playCurrentUrl() {
         fragLoadingTimeOut: 20000
       });
       hls = hlsInstance;
-      hlsRecovery = createHlsRecoveryController({ logger: createPlayerLogger() });
+      const playbackRecovery = createHlsRecoveryController({ logger: createPlayerLogger() });
+      hlsRecovery = playbackRecovery;
       hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
+        if (requestId !== playRequestId || playbackNodeManager !== nodeManager) {
+          return;
+        }
         const detail = data?.details || data?.type || "未知错误";
         setStatus(`播放失败：${detail}。可切换其他节点；也可能是地址失效、跨域限制、网络不可达或流格式不兼容。`, "error");
-        const recovery = hlsRecovery?.handleError(data, {
+        const recovery = playbackRecovery.handleError(data, {
           startLoad: () => hlsInstance.startLoad(),
           recoverMediaError: () => hlsInstance.recoverMediaError()
         });
@@ -563,6 +603,18 @@ async function playCurrentUrl() {
           return;
         }
         if (recovery?.exhausted) {
+          playbackNodeManager?.markFailure();
+          const nextNode = playbackNodeManager?.getNextNode();
+          if (nextNode && nextNode !== NodeManager.FAILED) {
+            const nextIndex = getNodeIndex(channel, nextNode.url);
+            if (nextIndex !== -1) {
+              activeNodeIndex.value = nextIndex;
+              syncUrlInput();
+              setStatus(`当前节点失败，自动切换至${activeNode.value.label || `节点${nextIndex + 1}`}...`);
+              playCurrentUrl({ automaticFailover: true });
+              return;
+            }
+          }
           if (!triedNativeFallback) {
             triedNativeFallback = true;
             destroyHls();
@@ -619,6 +671,7 @@ function handleFullscreenChange() {
 function updateActiveNodeUrl() {
   if (activeNodes.value[activeNodeIndex.value]) {
     activeNodes.value[activeNodeIndex.value].url = streamUrl.value;
+    resetNodeManager();
     if (activeNodes.value[activeNodeIndex.value].userAdded) {
       saveCustomNodes();
     }
@@ -764,6 +817,7 @@ async function loadChannels() {
 
 function handlePlaying() {
   hlsRecovery?.markPlaying();
+  nodeManager?.markSuccess(Math.max(Date.now() - nodeAttemptStartedAt, 0));
   setStatus(`播放中：${activeChannel.value?.name || "未知频道"} ${activeNode.value.label || `节点${activeNodeIndex.value + 1}`}。`, "ok");
 }
 
