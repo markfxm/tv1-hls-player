@@ -160,6 +160,8 @@ import Hls from "hls.js";
 import QRCode from "qrcode";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { calculateNodeFlyoutPosition } from "./nodeFlyoutPosition.js";
+import { createHlsRecoveryController } from "./player/hlsRecovery.ts";
+import { createPlayerLogger } from "./player/playerLogger.ts";
 
 const videoRef = ref(null);
 const channelListRef = ref(null);
@@ -180,6 +182,7 @@ const qrStatusMessage = ref("");
 const activeCategory = ref("");
 
 let hls = null;
+let hlsRecovery = null;
 let flvPlayer = null;
 let flvModule = null;
 let playRequestId = 0;
@@ -299,6 +302,8 @@ function syncUrlInput() {
 }
 
 function destroyHls() {
+  hlsRecovery?.destroy();
+  hlsRecovery = null;
   if (hls) {
     hls.destroy();
     hls = null;
@@ -537,17 +542,27 @@ async function playCurrentUrl() {
       flvPlayer.load();
     } else if (Hls.isSupported()) {
       let triedNativeFallback = false;
-      hls = new Hls({
+      const hlsInstance = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
         manifestLoadingTimeOut: 15000,
         levelLoadingTimeOut: 15000,
         fragLoadingTimeOut: 20000
       });
-      hls.on(Hls.Events.ERROR, (_event, data) => {
+      hls = hlsInstance;
+      hlsRecovery = createHlsRecoveryController({ logger: createPlayerLogger() });
+      hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
         const detail = data?.details || data?.type || "未知错误";
         setStatus(`播放失败：${detail}。可切换其他节点；也可能是地址失效、跨域限制、网络不可达或流格式不兼容。`, "error");
-        if (data?.fatal) {
+        const recovery = hlsRecovery?.handleError(data, {
+          startLoad: () => hlsInstance.startLoad(),
+          recoverMediaError: () => hlsInstance.recoverMediaError()
+        });
+        if (recovery?.recovered) {
+          setStatus(`播放恢复中（第 ${recovery.attempts || ""} 次重试）...`);
+          return;
+        }
+        if (recovery?.exhausted) {
           if (!triedNativeFallback) {
             triedNativeFallback = true;
             destroyHls();
@@ -561,8 +576,8 @@ async function playCurrentUrl() {
           showEmptyState.value = true;
         }
       });
-      hls.loadSource(playbackUrl);
-      hls.attachMedia(video);
+      hlsInstance.loadSource(playbackUrl);
+      hlsInstance.attachMedia(video);
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = playbackUrl;
     } else {
@@ -573,6 +588,7 @@ async function playCurrentUrl() {
     if (requestId !== playRequestId) {
       return;
     }
+    hlsRecovery?.markPlaying();
     setStatus(`播放中：${activeChannel.value?.name || "未知频道"} ${activeNode.value.label || `节点${activeNodeIndex.value + 1}`}。`, "ok");
   } catch (error) {
     if (requestId !== playRequestId || isInterruptedPlayError(error)) {
@@ -747,6 +763,7 @@ async function loadChannels() {
 }
 
 function handlePlaying() {
+  hlsRecovery?.markPlaying();
   setStatus(`播放中：${activeChannel.value?.name || "未知频道"} ${activeNode.value.label || `节点${activeNodeIndex.value + 1}`}。`, "ok");
 }
 
