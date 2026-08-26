@@ -11,6 +11,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -26,7 +27,12 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.analytics.AnalyticsListener;
+import androidx.media3.exoplayer.hls.HlsMediaSource;
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
@@ -63,6 +69,10 @@ public class MainActivity extends Activity {
     private static final String PREFS_NAME = "tv1_player";
     private static final String PREF_CUSTOM_NODES = "custom_nodes";
     private static final int ADD_NODE_PORT = 8765;
+    private static final String TAG = "TV1-Media3";
+    private static final long PLAYBACK_RECOVERY_DELAY_MS = 1000L;
+    private static final long PLAYBACK_STABLE_RESET_DELAY_MS = 10000L;
+    private static final int MAX_PLAYBACK_RECOVERY_ATTEMPTS = 3;
 
     private final List<Channel> channels = new ArrayList<>();
     private final List<Button> channelButtons = new ArrayList<>();
@@ -90,11 +100,17 @@ public class MainActivity extends Activity {
     private boolean userStopped = false;
     private boolean controlsVisible = true;
     private boolean pendingExitConfirm = false;
+    private boolean activityPaused = false;
+    private int playbackRecoveryAttempts = 0;
+    private boolean playbackRecoveryPending = false;
+    private boolean playbackStableResetPending = false;
     private AddNodeServer addNodeServer;
     private AlertDialog addNodeDialog;
     private AlertDialog exitConfirmDialog;
     private final Runnable hideControlsRunnable = this::hideControls;
     private final Runnable resetPendingExitRunnable = () -> pendingExitConfirm = false;
+    private final Runnable playbackRecoveryRunnable = this::recoverPlayback;
+    private final Runnable playbackStableResetRunnable = this::markPlaybackStable;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -211,15 +227,23 @@ public class MainActivity extends Activity {
     }
 
     private void initPlayer() {
-        player = new ExoPlayer.Builder(this).build();
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(15000, 50000, 1000, 1000)
+                .build();
+        player = new ExoPlayer.Builder(this)
+                .setLoadControl(loadControl)
+                .build();
         playerView.setPlayer(player);
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int playbackState) {
                 if (playbackState == Player.STATE_BUFFERING) {
                     setStatus("缓冲中：" + currentTitle());
-                } else if (playbackState == Player.STATE_READY && player.getPlayWhenReady()) {
-                    setStatus("播放中：" + currentTitle());
+                } else if (playbackState == Player.STATE_READY) {
+                    if (player.getPlayWhenReady()) {
+                        scheduleStablePlaybackReset();
+                        setStatus("播放中：" + currentTitle());
+                    }
                 } else if (playbackState == Player.STATE_ENDED) {
                     showControls();
                     setStatus("播放结束，可切换其它节点。");
@@ -228,13 +252,93 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPlayerError(PlaybackException error) {
-                if (!userStopped && tryNextNode()) {
+                if (schedulePlaybackRecovery(error)) {
+                    return;
+                }
+                Log.e(TAG, "Playback recovery exhausted for " + currentTitle()
+                        + ": " + error.getErrorCodeName(), error);
+                if (!userStopped && !activityPaused && tryNextNode()) {
                     return;
                 }
                 showControls();
                 setStatus("播放失败：" + error.getErrorCodeName() + "。请切换其它节点或检查网络。");
             }
         });
+        player.addAnalyticsListener(new AnalyticsListener() {
+            @Override
+            public void onVideoDecoderInitialized(
+                    AnalyticsListener.EventTime eventTime,
+                    String decoderName,
+                    long initializedTimestampMs,
+                    long initializationDurationMs) {
+                Log.i(TAG, "video decoder: " + decoderName);
+            }
+
+            @Override
+            public void onAudioDecoderInitialized(
+                    AnalyticsListener.EventTime eventTime,
+                    String decoderName,
+                    long initializedTimestampMs,
+                    long initializationDurationMs) {
+                Log.i(TAG, "audio decoder: " + decoderName);
+            }
+        });
+    }
+
+    private boolean schedulePlaybackRecovery(PlaybackException error) {
+        if (userStopped || activityPaused || player == null) {
+            return false;
+        }
+        if (playbackRecoveryPending) {
+            return true;
+        }
+        if (playbackRecoveryAttempts >= MAX_PLAYBACK_RECOVERY_ATTEMPTS) {
+            return false;
+        }
+
+        playbackRecoveryAttempts += 1;
+        playbackRecoveryPending = true;
+        uiHandler.removeCallbacks(playbackStableResetRunnable);
+        playbackStableResetPending = false;
+        Log.e(TAG, "Playback error: " + error.getErrorCodeName()
+                + ", recovery attempt: " + playbackRecoveryAttempts, error);
+        uiHandler.postDelayed(playbackRecoveryRunnable, PLAYBACK_RECOVERY_DELAY_MS);
+        return true;
+    }
+
+    private void recoverPlayback() {
+        playbackRecoveryPending = false;
+        if (userStopped || activityPaused || player == null) {
+            return;
+        }
+        Log.w(TAG, "Recovering playback, attempt: " + playbackRecoveryAttempts);
+        player.prepare();
+        player.play();
+    }
+
+    private void resetPlaybackRecovery() {
+        uiHandler.removeCallbacks(playbackRecoveryRunnable);
+        uiHandler.removeCallbacks(playbackStableResetRunnable);
+        playbackRecoveryPending = false;
+        playbackStableResetPending = false;
+        playbackRecoveryAttempts = 0;
+    }
+
+    private void scheduleStablePlaybackReset() {
+        if (playbackRecoveryAttempts == 0 || playbackStableResetPending) {
+            return;
+        }
+        playbackStableResetPending = true;
+        uiHandler.postDelayed(playbackStableResetRunnable, PLAYBACK_STABLE_RESET_DELAY_MS);
+    }
+
+    private void markPlaybackStable() {
+        playbackStableResetPending = false;
+        if (userStopped || activityPaused || player == null) {
+            return;
+        }
+        Log.i(TAG, "Playback stable; resetting recovery attempts.");
+        playbackRecoveryAttempts = 0;
     }
 
     private void loadChannels() {
@@ -850,13 +954,22 @@ public class MainActivity extends Activity {
         }
 
         userStopped = false;
+        resetPlaybackRecovery();
         setStatus("加载中：" + currentTitle());
         MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
                 .setUri(Uri.parse(node.url));
         if (isHlsUrl(node.url)) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8);
         }
-        player.setMediaItem(mediaItemBuilder.build());
+        MediaItem mediaItem = mediaItemBuilder.build();
+        if (isHlsUrl(node.url)) {
+            HlsMediaSource.Factory hlsFactory = new HlsMediaSource.Factory(
+                    new DefaultHttpDataSource.Factory())
+                    .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy());
+            player.setMediaSource(hlsFactory.createMediaSource(mediaItem));
+        } else {
+            player.setMediaItem(mediaItem);
+        }
         player.prepare();
         player.play();
         if (keepFullscreen) {
@@ -1181,15 +1294,26 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        activityPaused = true;
+        resetPlaybackRecovery();
         if (player != null) {
             player.pause();
         }
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        activityPaused = false;
+    }
+
+    @Override
     protected void onDestroy() {
+        userStopped = true;
+        activityPaused = true;
         uiHandler.removeCallbacks(hideControlsRunnable);
         uiHandler.removeCallbacks(resetPendingExitRunnable);
+        resetPlaybackRecovery();
         if (addNodeDialog != null) {
             addNodeDialog.dismiss();
             addNodeDialog = null;
