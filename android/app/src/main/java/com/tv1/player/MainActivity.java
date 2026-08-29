@@ -30,7 +30,6 @@ import androidx.media3.common.Player;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import androidx.media3.ui.AspectRatioFrameLayout;
@@ -85,6 +84,7 @@ public class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private ExoPlayer player;
+    private PlaybackDiagnostics playbackDiagnostics;
     private PlayerView playerView;
     private FrameLayout rootLayout;
     private LinearLayout sidePanel;
@@ -234,6 +234,8 @@ public class MainActivity extends Activity {
                 .setLoadControl(loadControl)
                 .build();
         playerView.setPlayer(player);
+        playbackDiagnostics = new PlaybackDiagnostics(this);
+        playbackDiagnostics.attach(player);
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int playbackState) {
@@ -262,25 +264,6 @@ public class MainActivity extends Activity {
                 }
                 showControls();
                 setStatus("播放失败：" + error.getErrorCodeName() + "。请切换其它节点或检查网络。");
-            }
-        });
-        player.addAnalyticsListener(new AnalyticsListener() {
-            @Override
-            public void onVideoDecoderInitialized(
-                    AnalyticsListener.EventTime eventTime,
-                    String decoderName,
-                    long initializedTimestampMs,
-                    long initializationDurationMs) {
-                Log.i(TAG, "video decoder: " + decoderName);
-            }
-
-            @Override
-            public void onAudioDecoderInitialized(
-                    AnalyticsListener.EventTime eventTime,
-                    String decoderName,
-                    long initializedTimestampMs,
-                    long initializationDurationMs) {
-                Log.i(TAG, "audio decoder: " + decoderName);
             }
         });
     }
@@ -942,6 +925,9 @@ public class MainActivity extends Activity {
     }
 
     private void playActiveNode(boolean keepFullscreen) {
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.stopSession();
+        }
         Node node = activeNode();
         if (node == null || node.url.isEmpty()) {
             if (keepFullscreen) {
@@ -955,6 +941,9 @@ public class MainActivity extends Activity {
 
         userStopped = false;
         resetPlaybackRecovery();
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.startSession(node.url);
+        }
         setStatus("加载中：" + currentTitle());
         MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
                 .setUri(Uri.parse(node.url));
@@ -1296,6 +1285,9 @@ public class MainActivity extends Activity {
         super.onPause();
         activityPaused = true;
         resetPlaybackRecovery();
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.detach();
+        }
         if (player != null) {
             player.pause();
         }
@@ -1305,6 +1297,9 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityPaused = false;
+        if (player != null && playbackDiagnostics != null) {
+            playbackDiagnostics.attach(player);
+        }
     }
 
     @Override
@@ -1325,6 +1320,10 @@ public class MainActivity extends Activity {
         if (addNodeServer != null) {
             addNodeServer.shutdown();
             addNodeServer = null;
+        }
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.detach();
+            playbackDiagnostics = null;
         }
         if (player != null) {
             player.release();

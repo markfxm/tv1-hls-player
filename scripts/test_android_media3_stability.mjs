@@ -16,6 +16,22 @@ const source = readFileSync(
   ),
   "utf8"
 );
+const diagnosticsSource = readFileSync(
+  join(
+    process.cwd(),
+    "android",
+    "app",
+    "src",
+    "main",
+    "java",
+    "com",
+    "tv1",
+    "player",
+    "PlaybackDiagnostics.java"
+  ),
+  "utf8"
+);
+const searchableSource = `${source}\n${diagnosticsSource}`;
 
 const requiredPatterns = [
   ["DefaultLoadErrorHandlingPolicy", "HLS must use Media3 DefaultLoadErrorHandlingPolicy."],
@@ -34,7 +50,7 @@ const requiredPatterns = [
 ];
 
 for (const [pattern, message] of requiredPatterns) {
-  if (!source.includes(pattern)) {
+  if (!searchableSource.includes(pattern)) {
     throw new Error(message);
   }
 }
