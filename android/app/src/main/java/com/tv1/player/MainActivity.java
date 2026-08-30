@@ -228,7 +228,7 @@ public class MainActivity extends Activity {
 
     private void initPlayer() {
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15000, 50000, 1000, 1000)
+                .setBufferDurationsMs(20000, 60000, 5000, 5000)
                 .build();
         player = new ExoPlayer.Builder(this)
                 .setLoadControl(loadControl)

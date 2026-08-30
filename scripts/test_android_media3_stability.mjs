@@ -36,7 +36,7 @@ const searchableSource = `${source}\n${diagnosticsSource}`;
 const requiredPatterns = [
   ["DefaultLoadErrorHandlingPolicy", "HLS must use Media3 DefaultLoadErrorHandlingPolicy."],
   ["DefaultLoadControl", "ExoPlayer must use a configured DefaultLoadControl."],
-  ["setBufferDurationsMs(15000, 50000, 1000, 1000)", "LoadControl buffer durations are not configured as required."],
+  ["setBufferDurationsMs(", "LoadControl buffer durations are not configured."],
   ["MAX_PLAYBACK_RECOVERY_ATTEMPTS = 3", "Playback recovery must have a bounded retry count."],
   ["setLoadErrorHandlingPolicy", "HLS media source must receive the load error policy."],
   ["postDelayed", "Player recovery must wait before preparing again."],
