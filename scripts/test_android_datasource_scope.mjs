@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const PRODUCTION_SOURCE_ROOTS = [
@@ -63,6 +63,10 @@ const playbackDiagnosticsSource = readRequired(
   ["android", "app", "src", "main", "java", "com", "tv1", "player", "PlaybackDiagnostics.java"],
   "Missing PlaybackDiagnostics source."
 );
+const analyzerSource = readRequired(
+  ["scripts", "analyze_a5_datasource_abba.mjs"],
+  "Missing Task 5 ABBA analyzer."
+);
 
 const bufferCalls = productionSourceFiles.flatMap((file) =>
   [...file.source.matchAll(/setBufferDurationsMs\s*\(([^)]*)\)/g)].map((match) => ({
@@ -124,6 +128,53 @@ if (backendIdentityMentions.length !== 2) {
 
 if (!playbackDiagnosticsSource.includes("SNAPSHOT_INTERVAL_MS = 5000L")) {
   throw new Error("Task 4 must preserve the diagnostics snapshot cadence.");
+}
+
+for (const analyzerContract of [
+  "export function parseRun(",
+  "export function analyzeAbba(",
+  "export function formatResultMarkdown(",
+  "MIN_LONG_SESSION_MS = 540000",
+  "MATERIAL_EFFECT = 0.3",
+  "STRONG_EFFECT = 0.5",
+  "INVALID_RUN_INCOMPLETE_SESSION",
+  "NEUTRAL_ZERO_REBUFFER",
+  "REGRESSION_FROM_ZERO",
+  "absoluteDeltaRebufferRatio",
+  "pooledImprovement",
+  "VIDEO_CODEC_ERROR",
+  "AUDIO_CODEC_ERROR",
+  "PLAYER_ERROR",
+  "OKHTTP_STRONG_WIN",
+  "OKHTTP_PARTIAL_WIN",
+  "OKHTTP_REGRESSION",
+  "INCONCLUSIVE_TEMPORAL_VARIABILITY",
+  "NO_MATERIAL_DIFFERENCE",
+  "INVALID_ABBA"
+]) {
+  if (!analyzerSource.includes(analyzerContract)) {
+    throw new Error(`Task 5 analyzer contract is missing ${analyzerContract}.`);
+  }
+}
+
+if (!analyzerSource.includes('"a1", "DEFAULT"')
+  || !analyzerSource.includes('"b1", "OKHTTP"')
+  || !analyzerSource.includes('"b2", "OKHTTP"')
+  || !analyzerSource.includes('"a2", "DEFAULT"')
+  || !analyzerSource.includes('"output"')) {
+  throw new Error("Task 5 analyzer CLI must require A1/B1/B2/A2 and an output path.");
+}
+
+for (const forbiddenArtifact of [
+  "TASK5B2_A5_DATASOURCE_ABBA_RESULT.md",
+  "a1_diag.log",
+  "b1_diag.log",
+  "b2_diag.log",
+  "a2_diag.log"
+]) {
+  if (existsSync(join(process.cwd(), forbiddenArtifact))) {
+    throw new Error(`Real ABBA result/log artifact must not be committed during implementation: ${forbiddenArtifact}`);
+  }
 }
 
 console.log("Android datasource Task 4 scope tests passed.");
