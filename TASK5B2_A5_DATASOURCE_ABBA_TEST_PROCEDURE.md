@@ -4,7 +4,9 @@
 
 This procedure is for device data collection only. It does not select an OkHttp winner and does not change playback configuration.
 
-- Code/CI APK baseline SHA: `a742ed6fb7e8dc834fc16f7e587c880f34665043`
+- Code/CI APK baseline SHA: `b8f9bc84dc923dcc0e39ca0ab999d2ac0a46f9ca`
+- Required APK SHA256: `2170F999D3C6A5A831180DCAB4A1C41033A5C72CDD54B06E902A0BB1EB5C3FD7`
+- Superseded APK SHA256 `6564AEFAEEF4A26898FD9CC9F6538F19505BF82CF8C0FC6A40BFD97DFBCDD005` must not be used.
 - Use one downloaded debug APK for all four runs. Record its `APK_SHA256` and keep the same hash for A1/B1/B2/A2; if a different APK is installed, restart the entire ABBA sequence.
 - Required source node: `052d52487bab`
 - Device: Egreat A5, serial `192.168.1.190:5555`
@@ -13,7 +15,7 @@ This procedure is for device data collection only. It does not select an OkHttp 
 - Use exactly the same severe-stutter Test A source URL used during TASK5A. Do not substitute a URL, node, playlist, or channel.
 - Keep the same A5, LAN/Wi-Fi path, HDMI mode, display, and application build throughout all four runs.
 
-The four runs are strictly ordered:
+Formal ABBA is currently blocked pending the mandatory short A5 smoke gate below. After that gate passes, the four runs are strictly ordered:
 
 ```text
 A1 (DEFAULT) → B1 (OKHTTP) → B2 (OKHTTP) → A2 (DEFAULT)
@@ -33,14 +35,43 @@ $serial = '192.168.1.190:5555'
 $apk = '.\android\app\build\outputs\apk\debug\app-debug.apk'
 
 Get-FileHash $apk -Algorithm SHA256
-# Record the displayed hash as APK_SHA256 in the test notes.
+# The hash must be:
+# 2170F999D3C6A5A831180DCAB4A1C41033A5C72CDD54B06E902A0BB1EB5C3FD7
+# Record it as APK_SHA256 in the test notes.
 
 & $adb connect $serial
 & $adb -s $serial get-state
 & $adb -s $serial install -r $apk
 ```
 
-Confirm that installation succeeds before beginning A1. Install the same APK once; do not reinstall between runs. The recorded `APK_SHA256` must be identical for A1, B1, B2, and A2. If the APK or hash changes, discard the partial sequence and restart from A1.
+Confirm that installation succeeds, then perform the short smoke gate below. Do not begin A1 until the smoke gate passes. Install the same APK once; do not reinstall between formal runs. The recorded `APK_SHA256` must be identical for A1, B1, B2, and A2. If the APK or hash changes, discard the partial sequence and restart from A1.
+
+## Mandatory short A5 backend-persistence smoke gate
+
+This is not B1 and is not a 10-minute run. It only verifies that the Activity-level `okhttp` override survives the switch from the initial channel to the required severe-stutter FLV node.
+
+Start a short logcat capture, launch the app with the OKHTTP override, then select the same target source used by TASK5A:
+
+```powershell
+$adb = 'E:\AI\高清电影播放器\platform-tools-latest-windows\platform-tools\adb.exe'
+$serial = '192.168.1.190:5555'
+
+& $adb -s $serial shell am force-stop com.tv1.player
+& $adb -s $serial logcat -c
+& $adb -s $serial shell am start -n com.tv1.player/.MainActivity --es tv1.datasource okhttp
+& $adb -s $serial logcat -v time |
+    Tee-Object -FilePath '.\a5_task5b2_backend_persistence_smoke.log' |
+    Select-String 'A5-DIAG|A5-DATASOURCE|DATASOURCE_BACKEND_DRIFT'
+```
+
+After selecting the target severe-stutter source, the same target session must contain both:
+
+```text
+[A5-DATASOURCE] backend=OKHTTP
+[A5-DIAG] SESSION_START ... dataSourceBackend=OKHTTP ... nodeId=052d52487bab
+```
+
+The smoke test fails if the target session reports `DEFAULT`, if `DATASOURCE_BACKEND_DRIFT` appears, or if the target node ID is not `052d52487bab`. Stop and report the log; do not begin formal ABBA. Only after this exact target-node evidence passes may the formal sequence restart from A1.
 
 ## Capture one run
 

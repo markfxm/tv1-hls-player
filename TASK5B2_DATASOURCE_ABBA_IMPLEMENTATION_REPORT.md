@@ -2,20 +2,20 @@
 
 ## Verdict
 
-**GREEN — DATASOURCE ABBA HARNESS READY FOR DEVICE TEST**
+**TASK5B2_BACKEND_PERSISTENCE_FIX_READY_FOR_A5_SMOKE_TEST**
 
-This is a code-and-CI readiness verdict. It does not prove that OkHttp wins, does not analyze real A5 logs, and does not start TASK5B3.
+This is a code-and-CI verdict for the narrowly scoped backend-persistence fix. Formal A1→B1→B2→A2 is not authorized until the short real-A5 target-node smoke test passes. This report does not prove that OkHttp wins, does not analyze an ABBA run, and does not start TASK5B3.
 
 ## Baseline and verification identity
 
 - Implementation branch: `codex/task5b2-datasource-abba`
-- Code baseline built by CI: `a742ed6fb7e8dc834fc16f7e587c880f34665043`
-- Artifact workflow commit: `e133a18f185b6da660db1939fb2bd65fa3d01ead`
-- CI run: [33302140213](https://github.com/markfxm/tv1-hls-player/actions/runs/33302140213)
+- Code baseline built by CI: `b8f9bc84dc923dcc0e39ca0ab999d2ac0a46f9ca`
+- CI run: [33314788094](https://github.com/markfxm/tv1-hls-player/actions/runs/33314788094)
 - CI job: `assemble-debug` (the run completed successfully)
-- CI result: `:app:assembleDebug` exit 0; `BUILD SUCCESSFUL in 49s`
-- Artifact: `tv1-task5b2-a5-debug-apk`, available from the run's Artifacts section; GitHub artifact ID `9729295022`, archive size `5408883` bytes, extracted `app-debug.apk` size `5715651` bytes
-- Downloaded artifact SHA256: `6564AEFAEEF4A26898FD9CC9F6538F19505BF82CF8C0FC6A40BFD97DFBCDD005`
+- CI result: `:app:assembleDebug` exit 0; `BUILD SUCCESSFUL in 46s`
+- Artifact: `tv1-task5b2-a5-debug-apk`, available from the run's Artifacts section; GitHub artifact ID `9733103343`, archive size `5408979` bytes, extracted `app-debug.apk` size `5715731` bytes
+- Downloaded artifact SHA256: `2170F999D3C6A5A831180DCAB4A1C41033A5C72CDD54B06E902A0BB1EB5C3FD7`
+- Superseded APK SHA256, prohibited for further testing: `6564AEFAEEF4A26898FD9CC9F6538F19505BF82CF8C0FC6A40BFD97DFBCDD005`
 - CI OS: `ubuntu-24.04`, Linux amd64 runner
 - JDK: Temurin OpenJDK `17.0.20.1`
 - Gradle: `8.9`
@@ -40,6 +40,7 @@ Task5B2 implementation and test checkpoints contain:
 - `android/app/src/test/java/com/tv1/player/DataSourceBackendSelectorTest.java`
 - `android/app/src/test/java/com/tv1/player/TransferDiagnosticsTest.java`
 - `scripts/test_android_datasource_abba.mjs`
+- `scripts/test_android_datasource_backend_persistence.mjs`
 - `scripts/test_android_datasource_scope.mjs`
 - `scripts/test_android_playback_codec_errors.mjs`
 - `scripts/test_android_playback_diagnostics.mjs`
@@ -55,9 +56,16 @@ Task5B2 implementation and test checkpoints contain:
 
 ## Architecture
 
+### Root-cause audit
+
+- `ROOT_CAUSE=` `DataSourceBackendSelector.resolve(...)` was correctly called once in `MainActivity.initPlayer()`. The required node `052d52487bab` is the packaged `H264-FLV` node, so `isHlsUrl(node.url)` returned false. The old non-HLS branch then hard-coded the diagnostics identity to `DEFAULT` and called `player.setMediaItem(mediaItem)`, bypassing the Activity-selected `DataSource.Factory`. The observed drift was caused by this source-type branch, not by a second selector call.
+- `BACKEND_RESOLUTION_CALL_SITES=` one call in `MainActivity.initPlayer()`, reading `tv1.datasource` and storing it as the Activity-scoped `selectedDataSourceBackend`; no call exists in channel selection, node selection, automatic failover, or session startup.
+- `HLS_FACTORY_CREATION_CALL_SITES=` `MainActivity.playActiveNode()` constructs `HlsMediaSource.Factory(hlsDataSourceFactory)` for HLS and preserves `DefaultLoadErrorHandlingPolicy`. The same Activity-selected factory now constructs `ProgressiveMediaSource.Factory(hlsDataSourceFactory)` for FLV/progressive sources.
+- `SOURCE_SWITCH_PATH=` channel button / `selectChannel(...)`, node button, fullscreen channel switch, or `tryNextNode()` → `playActiveNode(...)` → stop old diagnostics session → read the same `selectedDataSourceBackend` → log/start the new diagnostics session → create HLS or progressive media source with the same selected factory.
+
 ### Backend selector and factory boundary
 
-`DataSourceBackendSelector` accepts the debug `tv1.datasource` extra. Debug `okhttp` selects OKHTTP; missing, default, or unknown values select DEFAULT. Release builds always resolve DEFAULT. The existing HLS path still constructs `HlsMediaSource.Factory` with the selected `DataSource.Factory` and retains `DefaultLoadErrorHandlingPolicy`.
+`DataSourceBackendSelector` accepts the debug `tv1.datasource` extra. Debug `okhttp` selects OKHTTP; missing, default, or unknown values select DEFAULT. Release builds always resolve DEFAULT. `MainActivity` resolves this exactly once and does not globally cache it across Activity recreation. The existing HLS path still constructs `HlsMediaSource.Factory` with the selected `DataSource.Factory` and retains `DefaultLoadErrorHandlingPolicy`; FLV/progressive playback now uses `ProgressiveMediaSource.Factory` with that same selected factory.
 
 The DEFAULT raw factory is `DefaultHttpDataSource.Factory`. The OKHTTP raw factory is `OkHttpDataSource.Factory` with the exact Media3 dependency `media3-datasource-okhttp:1.8.0`. No custom HTTP timeout, cache, request header, or DataSource behavior was introduced.
 
@@ -124,6 +132,7 @@ This implementation does not change Web HLS recovery, NodeManager, LiveBufferMan
 - `npm test`: PASS
 - `npm run build`: PASS; existing Vite chunk-size warnings only
 - `git diff --check`: PASS
+- Focused backend persistence test: PASS after verified RED failures for non-HLS DEFAULT fallback and multiple assignment
 - Local Android unit test: not executable; `gradle` is not installed
 - Local Android debug/release commands: exit 1 with `'gradle' is not recognized`; recorded as `LOCAL_ANDROID_TOOLCHAIN_UNAVAILABLE`
 - Android CI `:app:assembleDebug`: PASS, exit 0, `BUILD SUCCESSFUL`
@@ -132,7 +141,7 @@ This implementation does not change Web HLS recovery, NodeManager, LiveBufferMan
 
 ## Known limitations
 
-- No real Egreat A5 logs have been collected in this implementation stage.
+- The real A5 pre-device smoke test exposed the superseded APK's backend drift; no smoke test has yet been run with the new APK.
 - No A1→B1→B2→A2 verdict exists; synthetic fixtures are test-only.
 - The CI workflow compiles and publishes debug only; it does not perform device compatibility testing.
 - Local Android unit/release verification remains unavailable until a JDK/Gradle/SDK environment is provided.
@@ -140,4 +149,4 @@ This implementation does not change Web HLS recovery, NodeManager, LiveBufferMan
 
 ## Next gate
 
-Download the fixed `tv1-task5b2-a5-debug-apk` artifact, verify and record its SHA256, install it once on the Egreat A5, and execute the procedure in `TASK5B2_A5_DATASOURCE_ABBA_TEST_PROCEDURE.md` using the same TASK5A Test A source. Preserve all four full/filtered logs and confirm a same-session `SESSION_SUMMARY` before advancing each run, then run the analyzer. Do not begin TASK5B3, change production defaults, or infer a winner before analyzer output and review.
+Download the fixed `tv1-task5b2-a5-debug-apk` artifact and verify SHA256 `2170F999D3C6A5A831180DCAB4A1C41033A5C72CDD54B06E902A0BB1EB5C3FD7`. Install it on the Egreat A5 and perform only the short `tv1.datasource=okhttp` target-node smoke test in `TASK5B2_A5_DATASOURCE_ABBA_TEST_PROCEDURE.md`. Formal ABBA remains stopped until logs prove `[A5-DATASOURCE] backend=OKHTTP` and `SESSION_START dataSourceBackend=OKHTTP nodeId=052d52487bab` for the target source. Do not begin TASK5B3, change production defaults, or infer a winner.
