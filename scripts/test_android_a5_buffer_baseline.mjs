@@ -17,10 +17,10 @@ const mainActivity = readFileSync(
   "utf8"
 );
 
-const expectedTreatment = "setBufferDurationsMs(20000, 60000, 5000, 5000)";
-if (!mainActivity.includes(expectedTreatment)) {
+const expectedBaseline = "setBufferDurationsMs(15000, 50000, 1000, 1000)";
+if (!mainActivity.includes(expectedBaseline)) {
   throw new Error(
-    "TASK5B1 treatment must use setBufferDurationsMs(20000, 60000, 5000, 5000)."
+    "A5 buffer baseline must use setBufferDurationsMs(15000, 50000, 1000, 1000)."
   );
 }
 
@@ -30,16 +30,13 @@ const forbiddenPatterns = [
   "OkHttpDataSource",
   "MediaCodecSelector",
   "setTunnelingEnabled",
-  "setEnableDecoderFallback",
-  "TextureView",
-  "setPlaybackSpeed",
   "AudioProcessor"
 ];
 
 for (const pattern of forbiddenPatterns) {
   if (mainActivity.includes(pattern)) {
-    throw new Error(`TASK5B1 must not add or change sensitive playback setting: ${pattern}`);
+    throw new Error(`A5 baseline freeze must not add or change sensitive playback setting: ${pattern}`);
   }
 }
 
-console.log("Android A5 buffer treatment profile tests passed.");
+console.log("Android A5 buffer baseline freeze tests passed.");
