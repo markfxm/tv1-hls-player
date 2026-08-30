@@ -117,13 +117,15 @@ public final class InstrumentedDataSourceFactory implements DataSource.Factory {
 
 The concrete visibility may be package-private for test-only state access, but the constructor/method behavior above must remain available to the factory and tests. `TransferDiagnostics` owns an `AtomicLong` process-local monotonic `transferId` and a synchronized identity-keyed map from each `DataSource` instance to its active transfer state. State includes backend, transfer ID, URI host/path-safe identity, byte count, start time, and terminal flag. Identity keys are object identity, not URL equality.
 
-The wrapper performs `beginBeforeOpen` before calling `delegate.open(dataSpec)`, so `TRANSFER_START` exists even if open throws before the delegate listener callback. Delegate `TransferListener.onTransferStart` only enriches the existing state; it never emits START. `onBytesTransferred` updates byte count and throughput fields without per-read log spam. `onTransferEnd` requests normal terminal completion. Wrapper `close()` completes normal END only when no terminal event has occurred. Open/read/close exceptions call `failFromWrapper` and rethrow the original exception. Terminal transition is atomic/idempotent: each transfer emits exactly one `TRANSFER_END` or `TRANSFER_ERROR`, never both, then removes identity-map state. A later listener or close callback after ERROR is ignored.
+The identity-map key is always the raw delegate `DataSource` instance. `InstrumentedDataSource.open(DataSpec)` must call `diagnostics.beginBeforeOpen(delegate, dataSpec)` and only then call `delegate.open(dataSpec)`; it must never pass the wrapper identity to diagnostics. The raw delegate's registered `TransferListener` callbacks must receive that same raw delegate instance as `source` for `onTransferStart`, `onBytesTransferred`, and `onTransferEnd`. Therefore START exists even if open throws before the delegate listener callback. The listener's `onTransferStart` only enriches the existing raw-delegate state; it never emits START. `onBytesTransferred` updates byte count and throughput fields without per-read log spam. `onTransferEnd` requests normal terminal completion. Wrapper `close()` completes normal END only when no terminal event has occurred. Open/read/close exceptions call `failFromWrapper` and rethrow the original exception. Terminal transition is atomic/idempotent: each transfer emits exactly one `TRANSFER_END` or `TRANSFER_ERROR`, never both, then removes raw-delegate identity-map state. A later listener or close callback after ERROR is ignored.
+
+`PlaybackDataSourceFactory` must configure both the DEFAULT raw factory and the OKHTTP raw factory with the same `TransferDiagnostics` transfer listener before `InstrumentedDataSourceFactory` wraps each raw DataSource. The focused tests must prove: `beginBeforeOpen(rawDelegate)` followed by listener `onTransferStart(sameRawDelegate, ...)` reuses the same transfer ID/state with no duplicate START or second state; wrapper identity differs from raw delegate identity while only raw-delegate state exists; and no orphan state is created.
 
 Transfer logs use `[A5-NET]` and include `backend`, `transferId`, safe node identity, accumulated bytes, duration, and the transfer metrics needed by the analyzer (`slowTransfer5s`, `verySlowTransfer15s`, throughput). Full authenticated URLs are never logged.
 
 **TDD sequence:**
 
-1. Write fake delegate/listener tests for: normal START→END once; open exception before listener start START→ERROR once; listener `onTransferStart` does not duplicate START; read exception START→ERROR; close exception START→ERROR; ERROR never later emits END; active state is empty after every terminal; and two concurrent DataSource identities keep separate byte/terminal state.
+1. Write fake delegate/listener tests for: normal START→END once; open exception before listener start START→ERROR once; listener `onTransferStart` does not duplicate START; read exception START→ERROR; close exception START→ERROR; ERROR never later emits END; active state is empty after every terminal; two concurrent DataSource identities keep separate byte/terminal state; `beginBeforeOpen(rawDelegate)` plus listener callback on the same raw delegate reuses one state; and wrapper identity different from raw delegate identity does not create orphan or duplicate state.
 2. Run `gradle --no-daemon --stacktrace :app:testDebugUnitTest`; expected RED is absent classes or failed exactly-once assertions.
 3. Add the identity-map state machine and wrappers with no production playback calls, no retry, no seek, no buffering changes, and no asynchronous logging requirement.
 4. Run the same command and `node scripts/test_android_datasource_abba.mjs`; expected PASS is one START plus one terminal for every fake transfer, correct bytes, no duplicate terminal, and zero active state.
@@ -152,7 +154,7 @@ public final class PlaybackDataSourceFactory {
 }
 ```
 
-For `DEFAULT`, create `new DefaultHttpDataSource.Factory()` with no new settings. For `OKHTTP`, create `new OkHttpDataSource.Factory(new OkHttpClient.Builder().build())` with no custom settings. Both raw factories are wrapped by the same `InstrumentedDataSourceFactory` and receive the same `TransferDiagnostics` instance. This boundary does not alter `HlsMediaSource`, `DataSource`, HTTP policy, cache behavior, retries, or load error handling.
+For `DEFAULT`, create `new DefaultHttpDataSource.Factory()` with no new settings. For `OKHTTP`, create `new OkHttpDataSource.Factory(new OkHttpClient.Builder().build())` with no custom settings. Configure both raw factories with the same `TransferDiagnostics` transfer listener, then wrap each raw DataSource with the same `InstrumentedDataSourceFactory`. The wrapper must pass the raw delegate identity to `beginBeforeOpen` and the raw delegate must be the identity supplied to all transfer callbacks. This boundary does not alter `HlsMediaSource`, `DataSource`, HTTP policy, cache behavior, retries, or load error handling.
 
 **TDD sequence:**
 
@@ -212,7 +214,7 @@ The CLI requires all four input paths and an output path:
 node scripts/analyze_a5_datasource_abba.mjs --a1 a1_diag.log --b1 b1_diag.log --b2 b2_diag.log --a2 a2_diag.log --output TASK5B2_A5_DATASOURCE_ABBA_RESULT.md
 ```
 
-Parse `[A5-DATASOURCE]`, `[A5-DIAG] SESSION_START`, `[A5-DIAG] SESSION_SUMMARY`, `[A5-DIAG] SNAPSHOT`, `[A5-DIAG] BANDWIDTH`, and `[A5-NET] TRANSFER_END|TRANSFER_ERROR` fields. Use safe unknown handling for missing/`unknown`/unset values. Require each run to be at least nine minutes and near the ten-minute protocol, the expected backend, node `052d52487bab`, display `1920x1080@60`, and both `SESSION_START` and `SESSION_SUMMARY`. Missing summary returns `INVALID_RUN_INCOMPLETE_SESSION`; any validity failure produces overall `INVALID_ABBA` before performance verdict evaluation.
+Parse `[A5-DATASOURCE]`, `[A5-DIAG] SESSION_START`, `[A5-DIAG] SESSION_SUMMARY`, `[A5-DIAG] SNAPSHOT`, `[A5-DIAG] BANDWIDTH`, and `[A5-NET] TRANSFER_END|TRANSFER_ERROR` fields. Use safe unknown handling for missing/`unknown`/unset values. Require `valid long session duration >= 540000 ms`, the expected backend, node `052d52487bab`, display `1920x1080@60`, and both `SESSION_START` and `SESSION_SUMMARY`. Do not use a subjective “clearly near 10 minutes” rule. Missing either session marker is invalid; missing summary returns `INVALID_RUN_INCOMPLETE_SESSION`; any validity failure produces overall `INVALID_ABBA` before performance verdict evaluation.
 
 The per-run object must include wall duration, buffering count/duration/longest/min/median/average/max, dropped frames and per-minute rate, audio underruns, bandwidth min/median/average, player/decoder errors, startup latency, transfer slow counts, transfer throughput P10, session identity, backend, node, display, and summary presence. Preserve the distinction between callback interval dropped frames and session total dropped frames.
 
@@ -235,7 +237,7 @@ B_pooled = (B1.totalRebufferDurationMs + B2.totalRebufferDurationMs)
 
 When `A_pooled > 0`, `pooledImprovement = (A_pooled - B_pooled) / A_pooled`; when `A_pooled == 0`, it is `N/A`. Always report finite `absoluteDeltaPooledRebufferRatio = B_pooled - A_pooled`. Do not average pair effects and do not use epsilon.
 
-Implement `SAFETY_PASS` exactly as specified: no app crash, no decoder error, and no fatal player error. Audio safety fails only when B1 audio underruns exceed A1, B2 exceed A2, and the pooled B audio-underrun rate is at least 30% above pooled A, with the zero-baseline rule applied without Infinity. Dropped-frame safety uses the same pairwise and pooled 30% rule. Use the same-unit time-weighted rates; `A=0,B=0` is no regression, and `A=0,B>0` is a positive absolute regression.
+Before writing analyzer code, audit `android/app/src/main/java/com/tv1/player/PlaybackDiagnostics.java` and freeze the safety parser to event contracts that the existing diagnostics actually emits. The current baseline audit must record the available `PLAYER_ERROR` event with `error=<PlaybackException.getErrorCodeName()>`, decoder initialization/release events (`DECODER` and `DECODER_RELEASED`), and format/state events; it must also record that the current diagnostics source has no separate `DECODER_ERROR`, `CODEC_ERROR`, or `FATAL_ERROR` event. If the audit cannot mechanically distinguish decoder errors from the current real event fields, stop before Task 5 analyzer implementation with `SAFETY_SIGNAL_CONTRACT_UNRESOLVED` and report the currently available event names, the missing signal, and the smallest additive observation-only solution for separate approval. Do not invent new analyzer semantics or silently change TASK5A metric definitions. Only after this gate is resolved may the analyzer implement `SAFETY_PASS` exactly as specified: no app crash, no decoder error, and no fatal player error. Audio safety fails only when B1 audio underruns exceed A1, B2 exceed A2, and the pooled B audio-underrun rate is at least 30% above pooled A, with the zero-baseline rule applied without Infinity. Dropped-frame safety uses the same pairwise and pooled 30% rule. Use the same-unit time-weighted rates; `A=0,B=0` is no regression, and `A=0,B>0` is a positive absolute regression.
 
 Implement `NETWORK_SUPPORT_PASS`: in both pairs, at least two of these three directions improve consistently: `verySlowTransfer15sCount` decreases, `slowTransfer5sCount` decreases, `throughputP10Bps` increases. Do not introduce a composite score.
 
@@ -252,10 +254,11 @@ Zero-rebuffer pair results remain their special labels and are not forced into p
 
 **TDD sequence:**
 
-1. Write synthetic tests for valid ABBA parsing, wrong backend/node/display, missing summary, short run, exact pooled calculation, zero baseline A/B, 30% and 50% boundaries, safety regression, network support, precedence, and finite output.
-2. Run `node scripts/test_analyze_a5_datasource_abba.mjs`; expected RED is the missing analyzer or failed contract assertions.
-3. Add the parser, metric reducers, zero-safe formulas, safety/network gates, precedence evaluator, formatter, and CLI argument validation.
-4. Run `node scripts/test_analyze_a5_datasource_abba.mjs`; expected PASS includes every frozen verdict and no NaN/Infinity in serialized output.
+1. Run the required source audit of `PlaybackDiagnostics.java` and write a failing analyzer contract test when the real safety event set cannot distinguish decoder errors; expected gate result for the current baseline is `SAFETY_SIGNAL_CONTRACT_UNRESOLVED`, with the available events and missing signal recorded before any analyzer implementation.
+2. After the safety contract is separately resolved, write synthetic tests for valid ABBA parsing, wrong backend/node/display, exact `durationMs >= 540000`, missing summary, short run, exact pooled calculation, zero baseline A/B, 30% and 50% boundaries, safety regression using only approved real event fields, network support, precedence, and finite output.
+3. Run `node scripts/test_analyze_a5_datasource_abba.mjs`; expected RED is the missing analyzer or failed contract assertions.
+4. Add the parser, metric reducers, zero-safe formulas, safety/network gates, precedence evaluator, formatter, and CLI argument validation using only the approved event contract.
+5. Run `node scripts/test_analyze_a5_datasource_abba.mjs`; expected PASS includes every frozen verdict and no NaN/Infinity in serialized output.
 
 **Checkpoint:** After analyzer tests pass, commit only analyzer/tests/fixtures/package-script changes:
 
@@ -307,11 +310,11 @@ The procedure must document:
 - the fixed APK SHA and source node `052d52487bab` requirement;
 - the exact Egreat A5 ADB path `E:\AI\高清电影播放器\platform-tools-latest-windows\platform-tools\adb.exe`, serial `192.168.1.190:5555`, and launcher `com.tv1.player/.MainActivity`;
 - install once, force-stop before every run, and launch each backend with `--es tv1.datasource default` or `--es tv1.datasource okhttp`;
-- A1 → B1 → B2 → A2, ten minutes per run, 30–60 second capture interval, same source/network/display, no reboot, no channel switch, no remote interaction;
+- A1 → B1 → B2 → A2, with `10 minutes continuous logcat capture per run` and `30–60 seconds between runs`, using the same source/network/display, with no reboot, channel switch, or remote interaction;
 - logcat collection and filters for `A5-DIAG|A5-DATASOURCE|A5-NET`, including Windows PowerShell commands that save full and filtered logs;
 - required `SESSION_START`, `SESSION_SUMMARY`, backend/node/display identity, and invalidation conditions;
 - the primary metric table, startup-latency comparison, subjective observations as secondary evidence, and the analyzer command;
-- the rule that only the analyzer can assign `STRONG_IMPROVEMENT`, `PARTIAL_IMPROVEMENT`, `NO_MATERIAL_IMPROVEMENT`, or `INVALID_TEST` to the real A/B result, and that no winner is inferred from one run.
+- the rule that only the analyzer can assign `OKHTTP_STRONG_WIN`, `OKHTTP_PARTIAL_WIN`, `NO_MATERIAL_DIFFERENCE`, `INCONCLUSIVE_TEMPORAL_VARIABILITY`, `OKHTTP_REGRESSION`, or `INVALID_ABBA`; the device procedure and human observation must not assign a winner, and no winner is inferred from one run.
 
 The implementation report must use the code-stage verdict:
 
@@ -352,10 +355,14 @@ At every checkpoint, stage explicit paths only, confirm the two known untracked 
 - [ ] The selector has a pure release fallback and no production-default OkHttp path.
 - [ ] The HLS factory preserves `DefaultLoadErrorHandlingPolicy` and Task1–Task4 behavior.
 - [ ] Transfer START is emitted before `delegate.open()`, listener START only enriches state, and every terminal path is exactly once with cleanup.
+- [ ] The transfer identity map is keyed only by raw delegate DataSource identity; wrapper identity cannot create a second or orphan state.
 - [ ] Both backends share transfer instrumentation and emit safe node identity without authenticated query strings.
 - [ ] TASK5A diagnostics remain observation-only with unchanged metric definitions and snapshot interval.
+- [ ] The analyzer safety contract is audited against actual `PlaybackDiagnostics.java` events; unresolved decoder/fatal classification stops Task 5 with `SAFETY_SIGNAL_CONTRACT_UNRESOLVED`.
 - [ ] Analyzer uses time-weighted pooled ratios, zero-safe arithmetic, 30%/50% thresholds, exact safety/network gates, and frozen precedence.
 - [ ] `SESSION_START` and `SESSION_SUMMARY` are mandatory for a valid long run.
+- [ ] A valid long session has `durationMs >= 540000`; the device procedure requires ten minutes of continuous logcat capture per run, with 30–60 seconds only between runs.
+- [ ] Only the analyzer can emit `OKHTTP_STRONG_WIN`, `OKHTTP_PARTIAL_WIN`, `NO_MATERIAL_DIFFERENCE`, `INCONCLUSIVE_TEMPORAL_VARIABILITY`, `OKHTTP_REGRESSION`, or `INVALID_ABBA`; the procedure and human observation cannot declare a winner.
 - [ ] Static tests are focused contract tests rather than whole-file snapshots.
 - [ ] `npm test`, `npm run build`, Android unit tests, and real CI `assembleDebug` are required before the code-stage verdict.
 - [ ] No real-device result, OkHttp production adoption, buffer/decoder/audio/surface/tunneling/display change, or TASK5B3 work is included.
