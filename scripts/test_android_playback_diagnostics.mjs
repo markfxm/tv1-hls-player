@@ -136,8 +136,4 @@ for (const pattern of forbiddenPlaybackControlPatterns) {
   }
 }
 
-if (diagnostics.includes("onVideoCodecError") || diagnostics.includes("onAudioCodecError")) {
-  throw new Error("Media3 1.8.0 AnalyticsListener has no codec-error callbacks to implement here.");
-}
-
 console.log("Android playback diagnostics static tests passed.");

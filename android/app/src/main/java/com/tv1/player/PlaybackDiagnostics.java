@@ -94,6 +94,38 @@ public final class PlaybackDiagnostics {
         }
 
         @Override
+        public void onVideoCodecError(AnalyticsListener.EventTime eventTime, Exception exception) {
+            if (!isSessionLogging()) {
+                return;
+            }
+            String exceptionClass = exception == null ? "unknown" : exception.getClass().getName();
+            String causeClass = exception == null || exception.getCause() == null
+                    ? "none"
+                    : exception.getCause().getClass().getName();
+            logLine(
+                    "VIDEO_CODEC_ERROR",
+                    "decoder=" + valueOrUnknown(videoDecoder)
+                            + " exceptionClass=" + exceptionClass
+                            + " causeClass=" + causeClass);
+        }
+
+        @Override
+        public void onAudioCodecError(AnalyticsListener.EventTime eventTime, Exception exception) {
+            if (!isSessionLogging()) {
+                return;
+            }
+            String exceptionClass = exception == null ? "unknown" : exception.getClass().getName();
+            String causeClass = exception == null || exception.getCause() == null
+                    ? "none"
+                    : exception.getCause().getClass().getName();
+            logLine(
+                    "AUDIO_CODEC_ERROR",
+                    "decoder=" + valueOrUnknown(audioDecoder)
+                            + " exceptionClass=" + exceptionClass
+                            + " causeClass=" + causeClass);
+        }
+
+        @Override
         public void onBandwidthEstimate(
                 AnalyticsListener.EventTime eventTime,
                 int totalLoadTimeMs,
