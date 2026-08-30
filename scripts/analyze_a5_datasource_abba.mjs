@@ -28,6 +28,22 @@ function finiteNonNegative(value) {
 
 function parseFields(line) {
   const fields = {};
+  const braceStart = line.indexOf("{");
+  const braceEnd = line.lastIndexOf("}");
+  if (braceStart >= 0 && braceEnd > braceStart) {
+    for (const part of line.slice(braceStart + 1, braceEnd).split(/,\s*/)) {
+      const separator = part.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+      const key = part.slice(0, separator).trim();
+      const value = part.slice(separator + 1).trim();
+      if (/^[A-Za-z][A-Za-z0-9_]*$/.test(key)) {
+        fields[key] = value;
+      }
+    }
+    return fields;
+  }
   const fieldPattern = /([A-Za-z][A-Za-z0-9_]*)=([^\s]+)/g;
   let match;
   while ((match = fieldPattern.exec(line)) !== null) {
@@ -43,12 +59,14 @@ function eventRecords(text) {
   while ((match = eventPattern.exec(text)) !== null) {
     const lineEnd = text.indexOf("\n", match.index);
     const line = text.slice(match.index, lineEnd < 0 ? text.length : lineEnd);
+    const fields = parseFields(line);
     records.push({
       tag: match[1],
       event: match[2],
       line,
-      fields: parseFields(line),
-      timestamp: finiteNumber(parseFields(line).timestamp)
+      fields,
+      timestamp: finiteNumber(fields.timestamp),
+      index: match.index
     });
   }
   return records;
@@ -129,18 +147,59 @@ function knownDisplayValues(records) {
     .filter((display) => display.resolution || display.refreshRate !== null);
 }
 
-function transferMetrics(records) {
-  const transfers = records
-    .filter((record) => record.tag === "A5-NET" && ["TRANSFER_END", "TRANSFER_ERROR"].includes(record.event))
-    .map((record) => ({
+function booleanValue(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+function transferNodeMatchesHost(node, urlHost) {
+  if (!node || !urlHost || node === "unknown" || urlHost === "unknown") {
+    return false;
+  }
+  const normalizedNode = String(node).toLowerCase();
+  const normalizedHost = String(urlHost).toLowerCase();
+  return normalizedNode === normalizedHost || normalizedNode.startsWith(`${normalizedHost}/`);
+}
+
+function transferMetrics(records, sessionStart, sessionSummary, targetHost, expectedBackend) {
+  const associatedTransfers = new Map();
+  const transfers = [];
+  for (const record of records) {
+    if (record.tag !== "A5-NET") {
+      continue;
+    }
+    const transferId = finiteNumber(record.fields.transferId);
+    if (record.event === "TRANSFER_START") {
+      const startsInsideTargetSession = sessionStart
+        && record.index > sessionStart.index
+        && (!sessionSummary || record.index < sessionSummary.index);
+      if (transferId !== null
+        && startsInsideTargetSession
+        && normalizeBackend(record.fields.backend) === normalizeBackend(expectedBackend)
+        && transferNodeMatchesHost(record.fields.node, targetHost)) {
+        associatedTransfers.set(transferId, true);
+      }
+      continue;
+    }
+    if (!["TRANSFER_END", "TRANSFER_ERROR"].includes(record.event)
+      || transferId === null
+      || !associatedTransfers.has(transferId)) {
+      continue;
+    }
+    associatedTransfers.delete(transferId);
+    transfers.push({
       event: record.event,
       backend: record.fields.backend ?? "unknown",
-      transferId: finiteNumber(record.fields.transferId),
+      transferId,
       node: record.fields.node ?? "unknown",
       bytes: finiteNonNegative(record.fields.bytes),
       durationMs: finiteNonNegative(record.fields.durationMs),
-      throughputBps: finiteNonNegative(record.fields.throughput)
-    }));
+      throughputBps: finiteNonNegative(record.fields.throughput),
+      slowTransfer5s: booleanValue(record.fields.slowTransfer5s),
+      verySlowTransfer15s: booleanValue(record.fields.verySlowTransfer15s)
+    });
+  }
   const durations = transfers.map((transfer) => transfer.durationMs).filter((value) => value !== null);
   const throughputs = transfers.map((transfer) => transfer.throughputBps).filter((value) => value !== null);
   const durationStats = stats(durations);
@@ -159,8 +218,10 @@ function transferMetrics(records) {
     throughputP10Bps: throughputStats.p10,
     throughputMedianBps: throughputStats.median,
     throughputAverageBps: throughputStats.average,
-    slowTransfer5sCount: durations.filter((value) => value >= 5000).length,
-    verySlowTransfer15sCount: durations.filter((value) => value >= 15000).length
+    slowTransfer5sCount: transfers.filter((transfer) =>
+      transfer.slowTransfer5s ?? (transfer.durationMs !== null && transfer.durationMs >= 5000)).length,
+    verySlowTransfer15sCount: transfers.filter((transfer) =>
+      transfer.verySlowTransfer15s ?? (transfer.durationMs !== null && transfer.durationMs >= 15000)).length
   };
 }
 
@@ -184,36 +245,45 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
   const source = String(text ?? "");
   const records = eventRecords(source);
   const diagnostics = records.filter((record) => record.tag === "A5-DIAG");
-  const sessionStart = diagnostics.find((record) => record.event === "SESSION_START") ?? null;
-  const sessionSummary = [...diagnostics].reverse().find((record) => record.event === "SESSION_SUMMARY") ?? null;
-  const displayRecords = diagnostics.filter((record) => record.event === "DISPLAY");
-  const snapshotRecords = diagnostics.filter((record) => record.event === "SNAPSHOT");
-  const bufferingStarts = diagnostics.filter((record) => record.event === "BUFFERING_START");
-  const bufferingEnds = diagnostics.filter((record) => record.event === "BUFFERING_END");
-  const playingRecords = diagnostics.filter((record) => record.event === "IS_PLAYING");
-  const bandwidthRecords = diagnostics.filter((record) => record.event === "BANDWIDTH");
-  const droppedRecords = diagnostics.filter((record) => record.event === "DROPPED_FRAMES");
+  const normalizedExpectedBackend = normalizeBackend(expectedBackend);
+  const matchingStarts = diagnostics.filter((record) =>
+    record.event === "SESSION_START"
+      && normalizeBackend(record.fields.dataSourceBackend) === normalizedExpectedBackend
+      && record.fields.nodeId === expectedNode);
+  const targetCandidates = matchingStarts.map((start) => {
+    const summary = diagnostics.find((record) =>
+      record.event === "SESSION_SUMMARY"
+        && record.index > start.index
+        && record.fields.session === start.fields.session) ?? null;
+    return { start, summary, durationMs: readSummaryNumber(summary, "durationMs") };
+  });
+  const longTargetCandidates = targetCandidates.filter((candidate) =>
+    candidate.durationMs !== null && candidate.durationMs >= MIN_LONG_SESSION_MS);
+  const selectedCandidate = longTargetCandidates[0] ?? targetCandidates[0] ?? null;
+  const sessionStart = selectedCandidate?.start ?? null;
+  const sessionSummary = selectedCandidate?.summary ?? null;
+  const targetSessionId = sessionStart?.fields.session ?? null;
+  const scopedDiagnostics = targetSessionId
+    ? diagnostics.filter((record) => record.fields.session === targetSessionId)
+    : [];
+  const displayRecords = scopedDiagnostics.filter((record) => record.event === "DISPLAY");
+  const snapshotRecords = scopedDiagnostics.filter((record) => record.event === "SNAPSHOT");
+  const bufferingStarts = scopedDiagnostics.filter((record) => record.event === "BUFFERING_START");
+  const bufferingEnds = scopedDiagnostics.filter((record) => record.event === "BUFFERING_END");
+  const playingRecords = scopedDiagnostics.filter((record) => record.event === "IS_PLAYING");
+  const bandwidthRecords = scopedDiagnostics.filter((record) => record.event === "BANDWIDTH");
+  const droppedRecords = scopedDiagnostics.filter((record) => record.event === "DROPPED_FRAMES");
 
   const startFields = sessionStart?.fields ?? {};
   const summaryFields = sessionSummary?.fields ?? {};
-  const dataSourceLine = source.split(/\r?\n/).find((line) => line.includes("[A5-DATASOURCE]"));
-  const dataSourceFields = dataSourceLine ? parseFields(dataSourceLine) : {};
   const backendCandidates = [
-    normalizeBackend(dataSourceFields.backend),
     normalizeBackend(startFields.dataSourceBackend),
     normalizeBackend(summaryFields.dataSourceBackend)
   ].filter((value) => value !== null);
-  const backend = firstKnown(...[summaryFields.dataSourceBackend, startFields.dataSourceBackend,
-    dataSourceFields.backend].map(normalizeBackend));
+  const backend = firstKnown(...[summaryFields.dataSourceBackend, startFields.dataSourceBackend].map(normalizeBackend));
   const backendConflict = new Set(backendCandidates).size > 1;
-  const sessionCandidates = [startFields.session, summaryFields.session]
-    .filter((value) => value && value !== "unknown");
   const sessionId = firstKnown(summaryFields.session, startFields.session);
-  const sessionConflict = new Set(sessionCandidates).size > 1;
-  const nodeCandidates = [startFields.nodeId, summaryFields.nodeId]
-    .filter((value) => value && value !== "unknown");
-  const nodeId = firstKnown(summaryFields.nodeId, startFields.nodeId, startFields.urlHash);
-  const nodeConflict = new Set(nodeCandidates).size > 1;
+  const nodeId = firstKnown(startFields.nodeId, startFields.urlHash);
   const wallDurationMs = readSummaryNumber(sessionSummary, "durationMs");
   const displayResolution = firstKnown(summaryFields.displayResolution, displayRecords[0]?.fields.resolution);
   const displayRefreshRate = firstKnown(
@@ -249,7 +319,7 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
 
   const fallbackRebufferDurations = [];
   let openBufferingTimestamp = null;
-  for (const record of diagnostics) {
+  for (const record of scopedDiagnostics) {
     if (record.event === "BUFFERING_START") {
       openBufferingTimestamp = timestampOf(record);
     } else if (record.event === "BUFFERING_END" && openBufferingTimestamp !== null && record.timestamp !== null) {
@@ -284,10 +354,10 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
     safeRatio(droppedFramesTotal, wallDurationMs) === null ? null : safeRatio(droppedFramesTotal, wallDurationMs) * 60000
   );
   const audioUnderrunCount = firstKnown(readSummaryNumber(sessionSummary, "audioUnderrunCount"),
-    diagnostics.filter((record) => record.event === "AUDIO_UNDERRUN").length);
-  const playerErrorCount = diagnostics.filter((record) => record.event === "PLAYER_ERROR").length;
-  const videoCodecErrorCount = diagnostics.filter((record) => record.event === "VIDEO_CODEC_ERROR").length;
-  const audioCodecErrorCount = diagnostics.filter((record) => record.event === "AUDIO_CODEC_ERROR").length;
+    scopedDiagnostics.filter((record) => record.event === "AUDIO_UNDERRUN").length);
+  const playerErrorCount = scopedDiagnostics.filter((record) => record.event === "PLAYER_ERROR").length;
+  const videoCodecErrorCount = scopedDiagnostics.filter((record) => record.event === "VIDEO_CODEC_ERROR").length;
+  const audioCodecErrorCount = scopedDiagnostics.filter((record) => record.event === "AUDIO_CODEC_ERROR").length;
   const firstPlaying = playingRecords.find((record) => record.fields.playing === "true" && record.timestamp !== null);
   const sessionStartTimestamp = sessionStart?.timestamp ?? null;
   const startupLatencyMs = sessionStartTimestamp !== null && firstPlaying
@@ -296,7 +366,13 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
   const bandwidthStats = stats(
     bandwidthRecords.map((record) => finiteNumber(record.fields.estimatebps)).filter((value) => value !== null)
   );
-  const transfer = transferMetrics(records);
+  const transfer = transferMetrics(
+    records,
+    sessionStart,
+    sessionSummary,
+    startFields.urlHost,
+    normalizedExpectedBackend
+  );
   const videoMime = firstKnown(summaryFields.videoMime);
   const resolution = firstKnown(summaryFields.resolution);
   const fps = finiteNumber(summaryFields.fps);
@@ -306,24 +382,21 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
   const appCrashObserved = /^\s*\[ABBA-INVALID\].*\bAPP_CRASH\b/m.test(source);
 
   const validityFailures = [];
+  if (matchingStarts.length === 0) validityFailures.push("MISSING_TARGET_SESSION");
+  if (longTargetCandidates.length > 1) validityFailures.push("AMBIGUOUS_TARGET_SESSION");
   if (!sessionStart) validityFailures.push("MISSING_SESSION_START");
   if (!sessionSummary) validityFailures.push("INVALID_RUN_INCOMPLETE_SESSION");
   if (!sessionId) validityFailures.push("MISSING_SESSION_ID");
   if (wallDurationMs === null) validityFailures.push("MISSING_DURATION");
   else if (wallDurationMs < MIN_LONG_SESSION_MS) validityFailures.push("DURATION_BELOW_540000");
-  if (normalizeBackend(expectedBackend) !== backend) validityFailures.push("BACKEND_MISMATCH");
+  if (normalizedExpectedBackend !== backend) validityFailures.push("BACKEND_MISMATCH");
   if (backendConflict) validityFailures.push("BACKEND_IDENTITY_CONFLICT");
-  if (sessionConflict) validityFailures.push("SESSION_IDENTITY_CONFLICT");
-  if (nodeConflict) validityFailures.push("NODE_IDENTITY_CONFLICT");
   if (nodeId !== expectedNode) validityFailures.push("NODE_MISMATCH");
   if (!displayResolution || displayRefreshRate === null) validityFailures.push("DISPLAY_UNKNOWN");
   else if (displayResolution !== expectedDisplayResolution
     || Math.abs(displayRefreshRate - expectedDisplayRefreshRate) > 0.5
     || displayDrift) validityFailures.push("DISPLAY_DRIFT");
   if (appCrashObserved) validityFailures.push("APP_CRASH_OBSERVED");
-  if (transfer.transfers.some((item) => item.node !== "unknown" && item.node !== expectedNode)) {
-    validityFailures.push("TRANSFER_NODE_MISMATCH");
-  }
 
   return {
     sourceName: "unknown",
@@ -333,7 +406,7 @@ export function parseRun(text, expectedBackend, expectedNode = DEFAULT_NODE) {
     sessionSummaryPresent: Boolean(sessionSummary),
     sessionId: sessionId ?? "unknown",
     backend: backend ?? "unknown",
-    expectedBackend: normalizeBackend(expectedBackend),
+    expectedBackend: normalizedExpectedBackend,
     nodeId: nodeId ?? "unknown",
     expectedNode,
     wallDurationMs,

@@ -166,14 +166,13 @@ if (!analyzerSource.includes('"a1", "DEFAULT"')
 }
 
 for (const forbiddenArtifact of [
-  "TASK5B2_A5_DATASOURCE_ABBA_RESULT.md",
   "a1_diag.log",
   "b1_diag.log",
   "b2_diag.log",
   "a2_diag.log"
 ]) {
   if (existsSync(join(process.cwd(), forbiddenArtifact))) {
-    throw new Error(`Real ABBA result/log artifact must not be committed during implementation: ${forbiddenArtifact}`);
+    throw new Error(`Real ABBA raw log must not be committed: ${forbiddenArtifact}`);
   }
 }
 

@@ -43,6 +43,30 @@ function setPairTotals(runs, a1, b1, b2, a2) {
   }
 }
 
+function realShapeRun({ backend, sessionId, durationMs, totalRebufferDurationMs }) {
+  const navSession = `${sessionId}-nav`;
+  return [
+    `[A5-DATASOURCE] backend=${backend}`,
+    `[A5-DIAG] SESSION_START session=${navSession} timestamp=100000 dataSourceBackend=${backend} nodeId=608d5b661eca urlHost=69.30.245.50 urlHash=608d5b661eca`,
+    `[A5-DIAG] DISPLAY session=${navSession} timestamp=100000 resolution=1920x1080 refreshRate=60.000`,
+    `[A5-DIAG] IS_PLAYING session=${navSession} timestamp=102000 playing=true`,
+    `[A5-DIAG] SNAPSHOT session=${navSession} timestamp=103000 totalBufferedDurationMs=99999 droppedTotal=99 display=1920x1080@60.000`,
+    `[A5-DIAG] BANDWIDTH session=${navSession} timestamp=104000 estimatebps=99999999`,
+    `[A5-DIAG] PLAYER_ERROR session=${navSession} timestamp=105000 error=PRE_TARGET_ONLY`,
+    `[A5-NET] TRANSFER_START {throughput=0, slowTransfer5s=false, verySlowTransfer15s=false, transferId=1, tag=[A5-NET], durationMs=0, backend=${backend}, node=69.30.245.50/live/cctv1.m3u8, bytes=0}`,
+    `[A5-DIAG] SESSION_SUMMARY session=${navSession} timestamp=110000 durationMs=10000 dataSourceBackend=${backend} displayResolution=1920x1080 displayRefreshRate=60.000 rebufferCount=0 totalRebufferDurationMs=0 longestRebufferMs=0 bufferMinMs=99999 bufferAvgMs=99999 bufferMaxMs=99999 droppedFramesTotal=99 droppedFramesPerMinute=594 audioUnderrunCount=0`,
+    `[A5-DIAG] SESSION_START session=${sessionId} timestamp=200000 dataSourceBackend=${backend} nodeId=${nodeId} urlHost=43.152.224.209 urlHash=${nodeId}`,
+    `[A5-DIAG] DISPLAY session=${sessionId} timestamp=200000 resolution=1920x1080 refreshRate=60.000`,
+    `[A5-DIAG] IS_PLAYING session=${sessionId} timestamp=203000 playing=true`,
+    `[A5-DIAG] SNAPSHOT session=${sessionId} timestamp=205000 totalBufferedDurationMs=320 droppedTotal=0 display=1920x1080@60.000`,
+    `[A5-DIAG] BANDWIDTH session=${sessionId} timestamp=206000 estimatebps=500000`,
+    `[A5-NET] TRANSFER_START {throughput=0, slowTransfer5s=false, verySlowTransfer15s=false, transferId=11, tag=[A5-NET], durationMs=0, backend=${backend}, node=43.152.224.209/qctv.fengshows.cn/live/0701phk72.flv, bytes=0}`,
+    `[A5-DIAG] SESSION_SUMMARY session=${sessionId} timestamp=${200000 + durationMs} durationMs=${durationMs} dataSourceBackend=${backend} videoMime=video/avc resolution=1280x720 displayResolution=1920x1080 displayRefreshRate=60.000 droppedFramesTotal=0 droppedFramesPerMinute=0 audioUnderrunCount=0 rebufferCount=50 totalRebufferDurationMs=${totalRebufferDurationMs} longestRebufferMs=30000 bufferMinMs=300 bufferAvgMs=600 bufferMaxMs=900`,
+    `[A5-NET] TRANSFER_END {throughput=1000, slowTransfer5s=true, verySlowTransfer15s=true, transferId=1, tag=[A5-NET], durationMs=600000, backend=${backend}, node=69.30.245.50/live/cctv1.m3u8, bytes=600000}`,
+    `[A5-NET] TRANSFER_END {throughput=8920, slowTransfer5s=true, verySlowTransfer15s=true, transferId=11, tag=[A5-NET], durationMs=344401, backend=${backend}, node=43.152.224.209/qctv.fengshows.cn/live/0701phk72.flv, bytes=3072306}`
+  ].join("\n");
+}
+
 const parsed = validRuns();
 for (const run of parsed) {
   assert.equal(run.valid, true, `${run.sourceName} should be valid`);
@@ -56,7 +80,7 @@ for (const run of parsed) {
 assert.equal(parseRun(fixture("a1_default.log"), "OKHTTP", nodeId).valid, false);
 assert.equal(parseRun(fixture("a1_default.log"), "DEFAULT", "other-node").valid, false);
 const conflictingBackend = parseRun(
-  fixture("a1_default.log").replace("[A5-DATASOURCE] backend=DEFAULT", "[A5-DATASOURCE] backend=OKHTTP"),
+  fixture("a1_default.log").replace(/(SESSION_SUMMARY[^\n]*dataSourceBackend=)DEFAULT/, "$1OKHTTP"),
   "DEFAULT",
   nodeId
 );
@@ -77,6 +101,75 @@ const missingSummary = parseRun(
 );
 assert.equal(missingSummary.valid, false);
 assert.ok(missingSummary.validityFailures.includes("INVALID_RUN_INCOMPLETE_SESSION"));
+
+const realDefaultShape = parseRun(realShapeRun({
+  backend: "DEFAULT",
+  sessionId: "target-default",
+  durationMs: 685409,
+  totalRebufferDurationMs: 625401
+}), "DEFAULT", nodeId);
+assert.equal(realDefaultShape.valid, true);
+assert.equal(realDefaultShape.sessionId, "target-default");
+assert.equal(realDefaultShape.nodeId, nodeId);
+assert.equal(realDefaultShape.bufferMaxMs, 320, "pre-target snapshots must not leak");
+assert.equal(realDefaultShape.bandwidthAverageBps, 500000, "pre-target bandwidth must not leak");
+assert.equal(realDefaultShape.playerErrorCount, 0, "pre-target errors must not leak");
+assert.equal(realDefaultShape.startupLatencyMs, 3000);
+assert.equal(realDefaultShape.transfers.length, 1, "only the target-host transfer should be associated");
+assert.deepEqual(realDefaultShape.transfers[0], {
+  event: "TRANSFER_END",
+  backend: "DEFAULT",
+  transferId: 11,
+  node: "43.152.224.209/qctv.fengshows.cn/live/0701phk72.flv",
+  bytes: 3072306,
+  durationMs: 344401,
+  throughputBps: 8920,
+  slowTransfer5s: true,
+  verySlowTransfer15s: true
+});
+
+const realOkHttpShape = parseRun(realShapeRun({
+  backend: "OKHTTP",
+  sessionId: "target-okhttp",
+  durationMs: 633117,
+  totalRebufferDurationMs: 586495
+}), "OKHTTP", nodeId);
+assert.equal(realOkHttpShape.valid, true);
+assert.equal(realOkHttpShape.transfers[0].backend, "OKHTTP");
+assert.equal(realOkHttpShape.transfers[0].transferId, 11);
+assert.equal(realOkHttpShape.transfers[0].bytes, 3072306);
+assert.equal(realOkHttpShape.transfers[0].durationMs, 344401);
+assert.equal(realOkHttpShape.transfers[0].throughputBps, 8920);
+assert.ok(!Object.values(realOkHttpShape.transfers[0]).some((value) =>
+  typeof value === "string" && value.endsWith(",")));
+
+const ambiguousTargetLog = realShapeRun({
+  backend: "DEFAULT",
+  sessionId: "target-one",
+  durationMs: 600000,
+  totalRebufferDurationMs: 100000
+}) + [
+  "",
+  `[A5-DIAG] SESSION_START session=target-two timestamp=900000 dataSourceBackend=DEFAULT nodeId=${nodeId} urlHost=43.152.224.209 urlHash=${nodeId}`,
+  "[A5-DIAG] SESSION_SUMMARY session=target-two timestamp=1500000 durationMs=600000 dataSourceBackend=DEFAULT displayResolution=1920x1080 displayRefreshRate=60.000 rebufferCount=1 totalRebufferDurationMs=100000 longestRebufferMs=100000 bufferMinMs=0 bufferAvgMs=500 bufferMaxMs=1000 droppedFramesTotal=0 droppedFramesPerMinute=0 audioUnderrunCount=0"
+].join("\n");
+const ambiguousTarget = parseRun(ambiguousTargetLog, "DEFAULT", nodeId);
+assert.equal(ambiguousTarget.valid, false);
+assert.ok(ambiguousTarget.validityFailures.includes("AMBIGUOUS_TARGET_SESSION"));
+
+const realShapeRuns = [
+  parseRun(realShapeRun({ backend: "DEFAULT", sessionId: "real-a1", durationMs: 685409, totalRebufferDurationMs: 625401 }), "DEFAULT", nodeId),
+  parseRun(realShapeRun({ backend: "OKHTTP", sessionId: "real-b1", durationMs: 633117, totalRebufferDurationMs: 586495 }), "OKHTTP", nodeId),
+  parseRun(realShapeRun({ backend: "OKHTTP", sessionId: "real-b2", durationMs: 621106, totalRebufferDurationMs: 567946 }), "OKHTTP", nodeId),
+  parseRun(realShapeRun({ backend: "DEFAULT", sessionId: "real-a2", durationMs: 635978, totalRebufferDurationMs: 571983 }), "DEFAULT", nodeId)
+];
+const realShapeResult = analyzeAbba(realShapeRuns);
+assert.equal(realShapeResult.verdict, "NO_MATERIAL_DIFFERENCE");
+assert.ok(Math.abs(realShapeResult.pairs[0].effect - (-0.0152466668)) < 0.00001);
+assert.ok(Math.abs(realShapeResult.pairs[1].effect - (-0.0167197)) < 0.00001);
+assert.ok(Math.abs(realShapeResult.pooled.A - 0.906157) < 0.00001);
+assert.ok(Math.abs(realShapeResult.pooled.B - 0.920443) < 0.00001);
+assert.ok(Math.abs(realShapeResult.pooled.pooledImprovement - (-0.015765)) < 0.00001);
 
 const baselineResult = analyzeAbba(parsed);
 assert.equal(baselineResult.verdict, "OKHTTP_STRONG_WIN");
