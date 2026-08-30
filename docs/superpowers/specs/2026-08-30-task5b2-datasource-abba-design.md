@@ -73,7 +73,7 @@ No other dependency or Media3 version changes.
 
 ## Transfer instrumentation
 
-Implement one shared `TransferDiagnostics` component for DEFAULT and OKHTTP. It uses Media3 `TransferListener` callbacks for `TRANSFER_START`, byte accumulation, and normal `TRANSFER_END`. A small delegating DataSource wrapper catches open/read/close exceptions so `TRANSFER_ERROR` is available without logging every `read()` call.
+Implement one shared `TransferDiagnostics` component for DEFAULT and OKHTTP. A delegating DataSource wrapper owns the transfer lifecycle. Before it calls `delegate.open(dataSpec)`, it allocates the monotonic transfer ID, creates the identity-map state, and emits exactly one `TRANSFER_START`. Media3 `TransferListener` callbacks then enrich that existing state with byte counts and normal completion; they never create or emit a second START. The wrapper catches open/read/close exceptions so `TRANSFER_ERROR` is available without logging every `read()` call.
 
 Every transfer receives a process-local monotonic `transferId` from an `AtomicLong`; IDs are never reused within the process. Transfer state is keyed by DataSource instance in a synchronized identity map, not one global start time. Each state has a terminal flag that can be claimed exactly once. After one `TRANSFER_END` or one `TRANSFER_ERROR` is emitted, the state is removed; later close, end, or listener callbacks are ignored and cannot emit a second terminal event.
 
@@ -81,6 +81,9 @@ The terminal contract is frozen as follows:
 
 - normal path: exactly `TRANSFER_START` → exactly one `TRANSFER_END`;
 - error path: exactly `TRANSFER_START` → exactly one `TRANSFER_ERROR`;
+- `TransferListener.onTransferStart` only confirms/enriches the wrapper-created state and never emits START;
+- if `delegate.open()` throws before Media3 invokes `onTransferStart`, the wrapper still emits START before the call and then emits ERROR exactly once;
+- read and close exceptions use the same ERROR terminal path;
 - error path never emits `TRANSFER_END` later;
 - error logging includes accumulated bytes and then cleans up identity-map state;
 - normal end cleans up identity-map state;
@@ -137,7 +140,53 @@ Effect size follows this frozen contract:
 
 Zero-rebuffer pairs are not forced into a percentage. Their `N/A` effect is retained in the pair report; it cannot satisfy a percentage threshold, and `REGRESSION_FROM_ZERO` blocks a win verdict. The final numeric `OKHTTP_REGRESSION` rule below applies only when both pair effects are numeric.
 
-Pairs are always reported as A1 vs B1 and A2 vs B2, even though the second physical order is B2 → A2. Freeze the material thresholds as `MATERIAL_EFFECT=30%` and `STRONG_EFFECT=50%`. `SAFETY_PASS` means neither B run introduces a decoder error, app crash, or material increase in audio underruns or dropped frames. `NETWORK_SUPPORT_PASS` means that, in both pairs, at least two of these three metrics move in the same improving direction:
+Pairs are always reported as A1 vs B1 and A2 vs B2, even though the second physical order is B2 → A2. Freeze the material thresholds as `MATERIAL_EFFECT=30%` and `STRONG_EFFECT=50%`.
+
+Define the time-weighted pooled ratios across the two runs, not as the simple mean of pair effects:
+
+```text
+A_pooled = (A1.totalRebufferDurationMs + A2.totalRebufferDurationMs)
+           / (A1.wallDurationMs + A2.wallDurationMs)
+B_pooled = (B1.totalRebufferDurationMs + B2.totalRebufferDurationMs)
+           / (B1.wallDurationMs + B2.wallDurationMs)
+```
+
+If `A_pooled > 0`:
+
+```text
+pooledImprovement = (A_pooled - B_pooled) / A_pooled
+```
+
+If `A_pooled == 0`, `pooledImprovement = N/A`. Always report the finite:
+
+```text
+absoluteDeltaPooledRebufferRatio = B_pooled - A_pooled
+```
+
+The analyzer must not use a simple average of `pair1Effect` and `pair2Effect`, an epsilon workaround, NaN, or Infinity. The PARTIAL rule below references this exact time-weighted `pooledImprovement`. The validated positive wall-duration denominators prevent division by zero; if either pooled denominator is unavailable, the run is invalid rather than coerced.
+
+`SAFETY_PASS` requires all of the following:
+
+- no app crash;
+- no decoder error;
+- no fatal player error, where fatal means an error that terminates the session or playback rather than a recoverable event.
+
+Audio and dropped frames fail safety only on consistent, material worsening. Define the pooled rates explicitly over both runs:
+
+```text
+A_audioUnderrunRate = (A1.audioUnderrunCount + A2.audioUnderrunCount)
+                      / (A1.wallDurationMs + A2.wallDurationMs)
+B_audioUnderrunRate = (B1.audioUnderrunCount + B2.audioUnderrunCount)
+                      / (B1.wallDurationMs + B2.wallDurationMs)
+A_droppedFrameRate = (A1.droppedFramesTotal + A2.droppedFramesTotal)
+                     / (A1.wallDurationMs + A2.wallDurationMs)
+B_droppedFrameRate = (B1.droppedFramesTotal + B2.droppedFramesTotal)
+                     / (B1.wallDurationMs + B2.wallDurationMs)
+```
+
+The dropped-frame rates may be displayed as frames per minute by multiplying both rates by `60000`; the comparison uses the same unit on both sides. For either rate `R`, always report `absoluteDeltaRate = B_R - A_R`. If `A_R > 0`, calculate `relativeIncrease = (B_R - A_R) / A_R`; a rate increase of `>= MATERIAL_EFFECT` is material. If `A_R == 0 && B_R == 0`, the rate comparison is zero-safe and not a regression. If `A_R == 0 && B_R > 0`, report `relativeIncrease = N/A` and treat the positive absolute increase as a zero-baseline safety regression; never produce Infinity. Audio safety regression requires both `B1.audioUnderrunCount > A1.audioUnderrunCount` and `B2.audioUnderrunCount > A2.audioUnderrunCount`, plus pooled audio-underrun rate increase `>= MATERIAL_EFFECT` or the zero-baseline safety rule. Dropped-frame safety regression requires both `B1.droppedFramesPerMinute > A1.droppedFramesPerMinute` and `B2.droppedFramesPerMinute > A2.droppedFramesPerMinute`, plus pooled dropped-frame rate increase `>= MATERIAL_EFFECT` or the zero-baseline safety rule. `SAFETY_PASS` is true only when neither the audio nor dropped-frame regression rule fires and the three fatal-safety conditions hold.
+
+`NETWORK_SUPPORT_PASS` means that, in both pairs, at least two of these three metrics move in the same improving direction:
 
 - `verySlowTransfer15sCount` decreases;
 - `slowTransfer5sCount` decreases;
@@ -147,7 +196,7 @@ The exact verdict precedence, evaluated top to bottom, is:
 
 1. `INVALID_ABBA` if any required identity, duration, node, display, session-summary, crash, or log condition fails; a missing summary is reported as `INVALID_RUN_INCOMPLETE_SESSION`.
 2. `OKHTTP_STRONG_WIN` if pair 1 effect is at least `STRONG_EFFECT`, pair 2 effect is at least `STRONG_EFFECT`, `SAFETY_PASS`, and `NETWORK_SUPPORT_PASS`.
-3. `OKHTTP_PARTIAL_WIN` if both pair effects are greater than zero, pooled improvement is at least `MATERIAL_EFFECT`, and the strong rule does not apply.
+3. `OKHTTP_PARTIAL_WIN` if both pair effects are greater than zero, the time-weighted `pooledImprovement` defined above is at least `MATERIAL_EFFECT`, and the strong rule does not apply.
 4. `OKHTTP_REGRESSION` if pair 1 effect is at most `-MATERIAL_EFFECT` and pair 2 effect is at most `-MATERIAL_EFFECT`.
 5. `INCONCLUSIVE_TEMPORAL_VARIABILITY` if pair directions conflict and at least one absolute effect is at least `MATERIAL_EFFECT`.
 6. `NO_MATERIAL_DIFFERENCE` when none of the preceding material win, regression, or inconclusive conditions applies.
@@ -175,9 +224,12 @@ Add focused tests before implementation code. The test suite must cover:
 13. analyzer requires `SESSION_START` and `SESSION_SUMMARY`, reporting `INVALID_RUN_INCOMPLETE_SESSION` for a missing summary;
 14. normal transfer emits START→END exactly once;
 15. transfer error emits START→ERROR exactly once and never END;
-16. terminal cleanup removes transfer state;
-17. concurrent DataSource identities do not collide;
-18. network support requires at least two consistent improvements across both pairs.
+16. an open exception before listener START still emits START→ERROR exactly once;
+17. `onTransferStart` does not duplicate wrapper-created START;
+18. read and close errors emit START→ERROR exactly once;
+19. terminal cleanup removes transfer state after every terminal path;
+20. concurrent DataSource identities do not collide;
+21. network support requires at least two consistent improvements across both pairs.
 
 Synthetic log fixtures may be created only for analyzer tests. They are not device results.
 
