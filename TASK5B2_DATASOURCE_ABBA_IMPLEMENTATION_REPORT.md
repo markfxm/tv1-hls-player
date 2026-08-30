@@ -10,9 +10,12 @@ This is a code-and-CI readiness verdict. It does not prove that OkHttp wins, doe
 
 - Implementation branch: `codex/task5b2-datasource-abba`
 - Code baseline built by CI: `a742ed6fb7e8dc834fc16f7e587c880f34665043`
-- CI run: [33300949593](https://github.com/markfxm/tv1-hls-player/actions/runs/33300949593)
-- CI job: `assemble-debug` / [job 99228873990](https://github.com/markfxm/tv1-hls-player/actions/runs/33300949593/job/99228873990)
-- CI result: `:app:assembleDebug` exit 0; `BUILD SUCCESSFUL in 47s`
+- Artifact workflow commit: `e133a18f185b6da660db1939fb2bd65fa3d01ead`
+- CI run: [33302140213](https://github.com/markfxm/tv1-hls-player/actions/runs/33302140213)
+- CI job: `assemble-debug` (the run completed successfully)
+- CI result: `:app:assembleDebug` exit 0; `BUILD SUCCESSFUL in 49s`
+- Artifact: `tv1-task5b2-a5-debug-apk`, available from the run's Artifacts section; GitHub artifact ID `9729295022`, archive size `5408883` bytes, extracted `app-debug.apk` size `5715651` bytes
+- Downloaded artifact SHA256: `6564AEFAEEF4A26898FD9CC9F6538F19505BF82CF8C0FC6A40BFD97DFBCDD005`
 - CI OS: `ubuntu-24.04`, Linux amd64 runner
 - JDK: Temurin OpenJDK `17.0.20.1`
 - Gradle: `8.9`
@@ -44,6 +47,7 @@ Task5B2 implementation and test checkpoints contain:
 - `scripts/test_analyze_a5_datasource_abba.mjs`
 - `tests/fixtures/a5_datasource_abba/*.log` (synthetic fixtures only)
 - `package.json`
+- `.github/workflows/android-build.yml` (post-build APK artifact upload only)
 - `TASK5B2_A5_DATASOURCE_ABBA_TEST_PROCEDURE.md`
 - `TASK5B2_DATASOURCE_ABBA_IMPLEMENTATION_REPORT.md`
 
@@ -123,17 +127,17 @@ This implementation does not change Web HLS recovery, NodeManager, LiveBufferMan
 - Local Android unit test: not executable; `gradle` is not installed
 - Local Android debug/release commands: exit 1 with `'gradle' is not recognized`; recorded as `LOCAL_ANDROID_TOOLCHAIN_UNAVAILABLE`
 - Android CI `:app:assembleDebug`: PASS, exit 0, `BUILD SUCCESSFUL`
-- Android CI workflow was not modified
-- APK artifact: upload not configured; no downloadable APK artifact is claimed. The runner output path would be `android/app/build/outputs/apk/debug/app-debug.apk`.
+- Android CI workflow: post-build `actions/upload-artifact@v4` step succeeded; existing assemble step and build inputs were unchanged
+- APK artifact: downloadable as `tv1-task5b2-a5-debug-apk`; the downloaded APK hash above is the identity to record and reuse for every ABBA run
 
 ## Known limitations
 
 - No real Egreat A5 logs have been collected in this implementation stage.
 - No A1→B1→B2→A2 verdict exists; synthetic fixtures are test-only.
-- The CI workflow compiles debug only and does not upload the APK.
+- The CI workflow compiles and publishes debug only; it does not perform device compatibility testing.
 - Local Android unit/release verification remains unavailable until a JDK/Gradle/SDK environment is provided.
 - Device behavior, startup latency, decoder load, audio underrun behavior, and network conditions still require the exact procedure on the target A5.
 
 ## Next gate
 
-Install the fixed debug APK on the Egreat A5 and execute the procedure in `TASK5B2_A5_DATASOURCE_ABBA_TEST_PROCEDURE.md` using the same TASK5A Test A source. Preserve all four full/filtered logs, then run the analyzer. Do not begin TASK5B3, change production defaults, or infer a winner before analyzer output and review.
+Download the fixed `tv1-task5b2-a5-debug-apk` artifact, verify and record its SHA256, install it once on the Egreat A5, and execute the procedure in `TASK5B2_A5_DATASOURCE_ABBA_TEST_PROCEDURE.md` using the same TASK5A Test A source. Preserve all four full/filtered logs and confirm a same-session `SESSION_SUMMARY` before advancing each run, then run the analyzer. Do not begin TASK5B3, change production defaults, or infer a winner before analyzer output and review.
