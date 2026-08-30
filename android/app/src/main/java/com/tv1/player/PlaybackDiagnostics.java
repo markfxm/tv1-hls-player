@@ -274,6 +274,7 @@ public final class PlaybackDiagnostics {
     private long sessionSequence;
     private long sessionStartMs;
     private String sessionId = "unknown";
+    private String dataSourceBackend = DataSourceBackend.DEFAULT.name();
     private String nodeId = "unknown";
     private String urlHost = "unknown";
     private String urlHash = "unknown";
@@ -364,6 +365,10 @@ public final class PlaybackDiagnostics {
     }
 
     public void startSession(String url) {
+        startSession(url, DataSourceBackend.DEFAULT.name());
+    }
+
+    public void startSession(String url, String dataSourceBackend) {
         stopSession();
         if (!ENABLE_PLAYBACK_DIAGNOSTICS) {
             return;
@@ -372,6 +377,7 @@ public final class PlaybackDiagnostics {
         sessionStartMs = System.currentTimeMillis();
         sessionId = createSessionId(sessionStartMs, sessionSequence);
         sessionActive = true;
+        this.dataSourceBackend = normalizeDataSourceBackend(dataSourceBackend);
         resetMetrics();
         setNodeIdentity(url);
         readDisplayMode();
@@ -382,7 +388,10 @@ public final class PlaybackDiagnostics {
         }
         logLine(
                 "SESSION_START",
-                "nodeId=" + nodeId + " urlHost=" + urlHost + " urlHash=" + urlHash);
+                "dataSourceBackend=" + this.dataSourceBackend
+                        + " nodeId=" + nodeId
+                        + " urlHost=" + urlHost
+                        + " urlHash=" + urlHash);
         logDisplay();
         handler.removeCallbacks(snapshotRunnable);
         handler.postDelayed(snapshotRunnable, SNAPSHOT_INTERVAL_MS);
@@ -551,6 +560,7 @@ public final class PlaybackDiagnostics {
         logLine(
                 "SESSION_SUMMARY",
                 "durationMs=" + durationMs
+                        + " dataSourceBackend=" + dataSourceBackend
                         + " videoMime=" + videoMime
                         + " resolution=" + formatResolution(videoWidth, videoHeight)
                         + " fps=" + formatFloat(videoFrameRate)
@@ -752,6 +762,14 @@ public final class PlaybackDiagnostics {
         liveOffsetSampleCount = 0L;
         liveOffsetTotalMs = 0L;
         liveOffsetMaxMs = Long.MIN_VALUE;
+    }
+
+    private static String normalizeDataSourceBackend(String value) {
+        if (value == null) {
+            return DataSourceBackend.DEFAULT.name();
+        }
+        String normalized = value.trim();
+        return normalized.isEmpty() ? DataSourceBackend.DEFAULT.name() : normalized;
     }
 
     private boolean isSessionLogging() {

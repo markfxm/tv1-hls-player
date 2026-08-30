@@ -27,7 +27,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.DataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
@@ -69,6 +69,7 @@ public class MainActivity extends Activity {
     private static final String PREF_CUSTOM_NODES = "custom_nodes";
     private static final int ADD_NODE_PORT = 8765;
     private static final String TAG = "TV1-Media3";
+    private static final String DATASOURCE_OVERRIDE_EXTRA = "tv1.datasource";
     private static final long PLAYBACK_RECOVERY_DELAY_MS = 1000L;
     private static final long PLAYBACK_STABLE_RESET_DELAY_MS = 10000L;
     private static final int MAX_PLAYBACK_RECOVERY_ATTEMPTS = 3;
@@ -85,6 +86,7 @@ public class MainActivity extends Activity {
 
     private ExoPlayer player;
     private PlaybackDiagnostics playbackDiagnostics;
+    private TransferDiagnostics transferDiagnostics;
     private PlayerView playerView;
     private FrameLayout rootLayout;
     private LinearLayout sidePanel;
@@ -104,6 +106,8 @@ public class MainActivity extends Activity {
     private int playbackRecoveryAttempts = 0;
     private boolean playbackRecoveryPending = false;
     private boolean playbackStableResetPending = false;
+    private DataSourceBackend dataSourceBackend = DataSourceBackend.DEFAULT;
+    private DataSource.Factory hlsDataSourceFactory;
     private AddNodeServer addNodeServer;
     private AlertDialog addNodeDialog;
     private AlertDialog exitConfirmDialog;
@@ -234,6 +238,16 @@ public class MainActivity extends Activity {
                 .setLoadControl(loadControl)
                 .build();
         playerView.setPlayer(player);
+        String dataSourceOverride = getIntent() == null
+                ? null
+                : getIntent().getStringExtra(DATASOURCE_OVERRIDE_EXTRA);
+        dataSourceBackend = DataSourceBackendSelector.resolve(dataSourceOverride, BuildConfig.DEBUG);
+        transferDiagnostics = new TransferDiagnostics(
+                dataSourceBackend.name(),
+                (event, fields) -> Log.i(
+                        TAG,
+                        fields.get("tag") + " " + event + " " + fields));
+        hlsDataSourceFactory = PlaybackDataSourceFactory.create(dataSourceBackend, transferDiagnostics);
         playbackDiagnostics = new PlaybackDiagnostics(this);
         playbackDiagnostics.attach(player);
         player.addListener(new Player.Listener() {
@@ -941,19 +955,24 @@ public class MainActivity extends Activity {
 
         userStopped = false;
         resetPlaybackRecovery();
+        boolean hlsUrl = isHlsUrl(node.url);
+        String sessionDataSourceBackend = hlsUrl
+                ? dataSourceBackend.name()
+                : DataSourceBackend.DEFAULT.name();
         if (playbackDiagnostics != null) {
-            playbackDiagnostics.startSession(node.url);
+            Log.i(TAG, "[A5-DATASOURCE] backend=" + sessionDataSourceBackend);
+            playbackDiagnostics.startSession(node.url, sessionDataSourceBackend);
         }
         setStatus("加载中：" + currentTitle());
         MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
                 .setUri(Uri.parse(node.url));
-        if (isHlsUrl(node.url)) {
+        if (hlsUrl) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8);
         }
         MediaItem mediaItem = mediaItemBuilder.build();
-        if (isHlsUrl(node.url)) {
+        if (hlsUrl) {
             HlsMediaSource.Factory hlsFactory = new HlsMediaSource.Factory(
-                    new DefaultHttpDataSource.Factory())
+                    hlsDataSourceFactory)
                     .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy());
             player.setMediaSource(hlsFactory.createMediaSource(mediaItem));
         } else {

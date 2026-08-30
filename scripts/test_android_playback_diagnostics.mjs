@@ -95,7 +95,6 @@ for (const [pattern, message] of requiredDiagnosticsPatterns) {
 const requiredMainActivityPatterns = [
   ["PlaybackDiagnostics", "MainActivity must integrate PlaybackDiagnostics."],
   ["playbackDiagnostics.attach(player)", "Diagnostics must attach to the player once."],
-  ["playbackDiagnostics.startSession(node.url)", "Each node playback must start a diagnostic session."],
   ["playbackDiagnostics.stopSession()", "Activity teardown must stop diagnostics."],
   ["playbackDiagnostics.detach()", "Activity lifecycle must detach diagnostics."]
 ];
@@ -104,6 +103,10 @@ for (const [pattern, message] of requiredMainActivityPatterns) {
   if (!mainActivity.includes(pattern)) {
     throw new Error(message);
   }
+}
+
+if (!/playbackDiagnostics\.startSession\s*\(\s*node\.url\s*(,\s*[^)]+)?\)/.test(mainActivity)) {
+  throw new Error("Each node playback must start a diagnostic session.");
 }
 
 if (mainActivity.includes("addAnalyticsListener")) {
