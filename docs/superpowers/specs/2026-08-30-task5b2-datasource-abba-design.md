@@ -73,9 +73,20 @@ No other dependency or Media3 version changes.
 
 ## Transfer instrumentation
 
-Implement one shared `TransferDiagnostics` component for DEFAULT and OKHTTP. It uses Media3 `TransferListener` callbacks for `TRANSFER_START`, byte accumulation, and `TRANSFER_END`. A small delegating DataSource wrapper catches open/read/close exceptions so `TRANSFER_ERROR` is available without logging every `read()` call.
+Implement one shared `TransferDiagnostics` component for DEFAULT and OKHTTP. It uses Media3 `TransferListener` callbacks for `TRANSFER_START`, byte accumulation, and normal `TRANSFER_END`. A small delegating DataSource wrapper catches open/read/close exceptions so `TRANSFER_ERROR` is available without logging every `read()` call.
 
-Transfer state is keyed by DataSource instance in a synchronized identity map, not one global start time. Each record contains backend, start/end timestamps, elapsed milliseconds, bytes, throughput, sanitized host/hash, transfer/data type when available, and DataSpec position/length when safe. End/error cleanup removes the per-transfer state. Logs never contain full URLs, query strings, tokens, passwords, or authentication headers.
+Every transfer receives a process-local monotonic `transferId` from an `AtomicLong`; IDs are never reused within the process. Transfer state is keyed by DataSource instance in a synchronized identity map, not one global start time. Each state has a terminal flag that can be claimed exactly once. After one `TRANSFER_END` or one `TRANSFER_ERROR` is emitted, the state is removed; later close, end, or listener callbacks are ignored and cannot emit a second terminal event.
+
+The terminal contract is frozen as follows:
+
+- normal path: exactly `TRANSFER_START` → exactly one `TRANSFER_END`;
+- error path: exactly `TRANSFER_START` → exactly one `TRANSFER_ERROR`;
+- error path never emits `TRANSFER_END` later;
+- error logging includes accumulated bytes and then cleans up identity-map state;
+- normal end cleans up identity-map state;
+- concurrent DataSource identities have independent transfer state and cannot collide.
+
+Each record contains backend, transfer ID, start/end timestamps, elapsed milliseconds, bytes, throughput, sanitized host/hash, transfer/data type when available, and DataSpec position/length when safe. Logs never contain full URLs, query strings, tokens, passwords, or authentication headers.
 
 No per-packet, per-buffer, or per-read logging is permitted.
 
@@ -107,20 +118,41 @@ The analyzer parses only the supplied files and does not use absolute paths. It 
 - backend identity matches A1 DEFAULT, B1 OKHTTP, B2 OKHTTP, A2 DEFAULT;
 - node ID is `052d52487bab`;
 - display mode is `1920x1080@60`; drift is reported and invalidates the ABBA result;
+- both `SESSION_START` and `SESSION_SUMMARY` exist; a missing summary is `INVALID_RUN_INCOMPLETE_SESSION`;
 - the required buffer baseline is externally confirmed by the freeze test.
 
 It calculates primary playback metrics from session/snapshot records: wall duration, rebuffer count/ratio, total and longest rebuffer, buffer min/P10/median/average/max, dropped frames, audio underruns, and player errors. It calculates network metrics from `[A5-NET]` records: transfer count/bytes, transfer elapsed median/P90/P95/longest, throughput median/P10/P05/minimum, and slow-transfer counts above 5 and 15 seconds. It also reports BandwidthMeter estimates and approximate `SESSION_START` → `IS_PLAYING=true` startup latency.
 
-Rebuffer ratio is `totalRebufferDurationMs / wallDurationMs`. A zero baseline duration is handled as unavailable; the analyzer never emits NaN or divides by zero.
+Rebuffer ratio is `totalRebufferDurationMs / wallDurationMs`. Every run and pair must avoid NaN and Infinity; no epsilon workaround is permitted. For each pair define `A_rebufferRatio`, `B_rebufferRatio`, and always calculate the finite absolute delta:
 
-Pairs are always reported as A1 vs B1 and A2 vs B2, even though the second physical order is B2 → A2. Verdict rules are:
+```text
+absoluteDeltaRebufferRatio = B_rebufferRatio - A_rebufferRatio
+```
 
-- `OKHTTP_STRONG_WIN`: both pairs improve by at least 50%, no material safety regression, and transfer metrics support fewer long stalls;
-- `OKHTTP_PARTIAL_WIN`: both pairs improve and pooled improvement is at least 30% but below the strong threshold;
-- `NO_MATERIAL_DIFFERENCE`: both improvements are below 30% without consistent network support;
-- `INCONCLUSIVE_TEMPORAL_VARIABILITY`: pair directions conflict;
-- `OKHTTP_REGRESSION`: both B runs are materially worse;
-- `INVALID_ABBA`: any identity, duration, node, display, crash, or required-log condition fails.
+Effect size follows this frozen contract:
+
+- if `A_rebufferRatio > 0`: `relativeImprovement = (A_rebufferRatio - B_rebufferRatio) / A_rebufferRatio`;
+- if `A_rebufferRatio == 0 && B_rebufferRatio == 0`: `relativeImprovement = N/A`, `pairResult = NEUTRAL_ZERO_REBUFFER`;
+- if `A_rebufferRatio == 0 && B_rebufferRatio > 0`: `relativeImprovement = N/A`, `pairResult = REGRESSION_FROM_ZERO`.
+
+Zero-rebuffer pairs are not forced into a percentage. Their `N/A` effect is retained in the pair report; it cannot satisfy a percentage threshold, and `REGRESSION_FROM_ZERO` blocks a win verdict. The final numeric `OKHTTP_REGRESSION` rule below applies only when both pair effects are numeric.
+
+Pairs are always reported as A1 vs B1 and A2 vs B2, even though the second physical order is B2 → A2. Freeze the material thresholds as `MATERIAL_EFFECT=30%` and `STRONG_EFFECT=50%`. `SAFETY_PASS` means neither B run introduces a decoder error, app crash, or material increase in audio underruns or dropped frames. `NETWORK_SUPPORT_PASS` means that, in both pairs, at least two of these three metrics move in the same improving direction:
+
+- `verySlowTransfer15sCount` decreases;
+- `slowTransfer5sCount` decreases;
+- `throughputP10Bps` increases.
+
+The exact verdict precedence, evaluated top to bottom, is:
+
+1. `INVALID_ABBA` if any required identity, duration, node, display, session-summary, crash, or log condition fails; a missing summary is reported as `INVALID_RUN_INCOMPLETE_SESSION`.
+2. `OKHTTP_STRONG_WIN` if pair 1 effect is at least `STRONG_EFFECT`, pair 2 effect is at least `STRONG_EFFECT`, `SAFETY_PASS`, and `NETWORK_SUPPORT_PASS`.
+3. `OKHTTP_PARTIAL_WIN` if both pair effects are greater than zero, pooled improvement is at least `MATERIAL_EFFECT`, and the strong rule does not apply.
+4. `OKHTTP_REGRESSION` if pair 1 effect is at most `-MATERIAL_EFFECT` and pair 2 effect is at most `-MATERIAL_EFFECT`.
+5. `INCONCLUSIVE_TEMPORAL_VARIABILITY` if pair directions conflict and at least one absolute effect is at least `MATERIAL_EFFECT`.
+6. `NO_MATERIAL_DIFFERENCE` when none of the preceding material win, regression, or inconclusive conditions applies.
+
+For zero-rebuffer pairs, apply the special pair result above and do not substitute a percentage or epsilon. If a zero pair prevents a numeric verdict condition from being satisfied, the analyzer falls through the frozen precedence without inventing an effect size.
 
 The analyzer emits no backend winner when the run is invalid. It does not change production configuration.
 
@@ -138,7 +170,14 @@ Add focused tests before implementation code. The test suite must cover:
 8. decoder/audio/Surface/tunneling/recovery/Web source areas are unchanged;
 9. analyzer recognizes valid A1/B1/B2/A2;
 10. analyzer rejects node mismatch and backend mismatch;
-11. analyzer computes rebuffer ratio and handles zero baseline safely.
+11. analyzer computes absolute delta and the three zero-rebuffer outcomes without NaN/Infinity or epsilon conversion;
+12. analyzer applies the frozen verdict precedence and 30%/50% thresholds;
+13. analyzer requires `SESSION_START` and `SESSION_SUMMARY`, reporting `INVALID_RUN_INCOMPLETE_SESSION` for a missing summary;
+14. normal transfer emits START→END exactly once;
+15. transfer error emits START→ERROR exactly once and never END;
+16. terminal cleanup removes transfer state;
+17. concurrent DataSource identities do not collide;
+18. network support requires at least two consistent improvements across both pairs.
 
 Synthetic log fixtures may be created only for analyzer tests. They are not device results.
 
