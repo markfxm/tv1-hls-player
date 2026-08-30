@@ -32,6 +32,7 @@ import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
+import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
@@ -106,7 +107,7 @@ public class MainActivity extends Activity {
     private int playbackRecoveryAttempts = 0;
     private boolean playbackRecoveryPending = false;
     private boolean playbackStableResetPending = false;
-    private DataSourceBackend dataSourceBackend = DataSourceBackend.DEFAULT;
+    private DataSourceBackend selectedDataSourceBackend;
     private DataSource.Factory hlsDataSourceFactory;
     private AddNodeServer addNodeServer;
     private AlertDialog addNodeDialog;
@@ -241,13 +242,17 @@ public class MainActivity extends Activity {
         String dataSourceOverride = getIntent() == null
                 ? null
                 : getIntent().getStringExtra(DATASOURCE_OVERRIDE_EXTRA);
-        dataSourceBackend = DataSourceBackendSelector.resolve(dataSourceOverride, BuildConfig.DEBUG);
+        selectedDataSourceBackend = DataSourceBackendSelector.resolve(
+                dataSourceOverride,
+                BuildConfig.DEBUG);
         transferDiagnostics = new TransferDiagnostics(
-                dataSourceBackend.name(),
+                selectedDataSourceBackend.name(),
                 (event, fields) -> Log.i(
                         TAG,
                         fields.get("tag") + " " + event + " " + fields));
-        hlsDataSourceFactory = PlaybackDataSourceFactory.create(dataSourceBackend, transferDiagnostics);
+        hlsDataSourceFactory = PlaybackDataSourceFactory.create(
+                selectedDataSourceBackend,
+                transferDiagnostics);
         playbackDiagnostics = new PlaybackDiagnostics(this);
         playbackDiagnostics.attach(player);
         player.addListener(new Player.Listener() {
@@ -956,10 +961,13 @@ public class MainActivity extends Activity {
         userStopped = false;
         resetPlaybackRecovery();
         boolean hlsUrl = isHlsUrl(node.url);
-        String sessionDataSourceBackend = hlsUrl
-                ? dataSourceBackend.name()
-                : DataSourceBackend.DEFAULT.name();
+        String sessionDataSourceBackend = selectedDataSourceBackend.name();
         if (playbackDiagnostics != null) {
+            if (!selectedDataSourceBackend.name().equals(sessionDataSourceBackend)) {
+                Log.e(TAG, "DATASOURCE_BACKEND_DRIFT expected="
+                        + selectedDataSourceBackend.name()
+                        + " actual=" + sessionDataSourceBackend);
+            }
             Log.i(TAG, "[A5-DATASOURCE] backend=" + sessionDataSourceBackend);
             playbackDiagnostics.startSession(node.url, sessionDataSourceBackend);
         }
@@ -976,7 +984,9 @@ public class MainActivity extends Activity {
                     .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy());
             player.setMediaSource(hlsFactory.createMediaSource(mediaItem));
         } else {
-            player.setMediaItem(mediaItem);
+            ProgressiveMediaSource.Factory progressiveFactory =
+                    new ProgressiveMediaSource.Factory(hlsDataSourceFactory);
+            player.setMediaSource(progressiveFactory.createMediaSource(mediaItem));
         }
         player.prepare();
         player.play();

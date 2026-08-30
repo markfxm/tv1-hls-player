@@ -195,11 +195,11 @@ if (!datasourceExtraRead) {
 
 const datasourceOverrideVariable = datasourceExtraRead[1];
 const selectorResolvePattern = new RegExp(
-  `dataSourceBackend\\s*=\\s*DataSourceBackendSelector\\.resolve\\s*\\(\\s*${escapeRegex(datasourceOverrideVariable)}\\s*,\\s*BuildConfig\\.DEBUG\\s*\\)\\s*;`
+  `selectedDataSourceBackend\\s*=\\s*DataSourceBackendSelector\\.resolve\\s*\\(\\s*${escapeRegex(datasourceOverrideVariable)}\\s*,\\s*BuildConfig\\.DEBUG\\s*\\)\\s*;`
 );
 if (!selectorResolvePattern.test(mainActivitySource)) {
   throw new Error(
-    `MainActivity must pass ${datasourceOverrideVariable} from the tv1.datasource extra into DataSourceBackendSelector.resolve(${datasourceOverrideVariable}, BuildConfig.DEBUG).`
+    `MainActivity must resolve ${datasourceOverrideVariable} from the tv1.datasource extra exactly once into selectedDataSourceBackend.`
   );
 }
 
