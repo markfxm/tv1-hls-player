@@ -45,3 +45,11 @@ jobs:
       - name: Assemble debug APK
         working-directory: android
         run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tv1-task5b2-a5-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 90
